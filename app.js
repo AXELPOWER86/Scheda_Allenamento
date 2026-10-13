@@ -465,11 +465,15 @@ function download(name, text) {
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+/* ---------- ascolto e gestione utente con supporto Alias ---------- */
 function listenToUid(targetId) {
   if (unsub) { unsub(); unsub = null; }
   
-  const isEmail = targetId.includes("@");
-  const safePathId = isEmail 
+  // Se viene inserito un alias semplice (es. "alessandro"), una mail o un UID
+  const isEmailOrAlias = targetId.includes("@") || !targetId.match(/^[a-zA-Z0-9]{20,}$/);
+  
+  // Normalizza l'alias o la mail per Firestore
+  const safePathId = isEmailOrAlias 
     ? targetId.trim().toLowerCase().replace(/[@.]/g, "_") 
     : targetId.trim();
     
