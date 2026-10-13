@@ -592,11 +592,7 @@ async function listenToUid(targetInput) {
   
   unsub = onSnapshot(ref, (snap) => {
     if (!snap.exists()) {
-      if (snap.metadata.fromCache) {
-        showMsg("<p>Connessione in corso...</p>");
-      } else {
-        showOnboarding();
-      }
+      showOnboarding();
       return;
     }
     
@@ -772,7 +768,6 @@ onAuthStateChanged(auth, async (u) => {
   
   await loadAliases();
   
-  // Associazione automatica dell'email al login dell'utente (se non è l'admin)
   if (u.email && u.email !== ADMIN_EMAIL) {
     const emailLower = u.email.toLowerCase();
     if (aliasesCache[emailLower] !== u.uid) {
