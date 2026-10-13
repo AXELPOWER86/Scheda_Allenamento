@@ -78,6 +78,7 @@ function findRow(id) {
   return null;
 }
 const inLib = (g, ex) => (plan.library[g] || []).some((x) => x.toLowerCase() === ex.toLowerCase());
+const groupsList = () => [...new Set([...GROUPS, ...Object.keys(plan.library)])];
 const hasKg = (id) => Object.keys(plan.kg).some((k) => k.startsWith(id + "_"));
 function clearRowKg(id) {
   Object.keys(plan.kg).filter((k) => k.startsWith(id + "_")).forEach((k) => {
@@ -167,7 +168,7 @@ function exOptions(r) {
 }
 function cardEdit(r, i, n) {
   return `<div class="card" data-row="${r.id}">
-    <div class="erow"><select data-f="group">${GROUPS.map((g) =>
+    <div class="erow"><select data-f="group">${groupsList().map((g) =>
       `<option ${g === r.group ? "selected" : ""}>${g}</option>`).join("")}</select>
       <select data-f="ex">${exOptions(r)}</select></div>
     <div class="schemes">${Array.from({ length: plan.weeks }, (_, w) =>
@@ -206,16 +207,91 @@ function updateCalc() {
 /* --- impostazioni --- */
 function viewOpz() {
   return `<div class="sec">Libreria esercizi</div>
-    ${GROUPS.map((g) => `<details><summary>${g} (${(plan.library[g] || []).length})</summary>
+    ${groupsList().map((g) => `<details><summary>${g} (${(plan.library[g] || []).length})</summary>
       <div class="tags">${(plan.library[g] || []).map((x, i) =>
         `<span class="tag">${esc(x)}<button data-a="lib-del" data-g="${g}" data-i="${i}">&times;</button></span>`).join("")}</div>
       <div class="erow"><input type="text" data-newex="${g}" placeholder="Nuovo esercizio" style="flex:1">
       <button class="btn" data-a="lib-add" data-g="${g}">Aggiungi</button></div></details>`).join("")}
     <div class="sec">Dati</div>
     <div class="erow"><button class="btn ghost" data-a="export">Esporta backup (JSON)</button>
-    <button class="btn ghost" data-a="import">Importa backup</button></div>
+    <button class="btn ghost" data-a="import">Importa scheda (Excel o backup)</button></div>
     <div class="erow"><button class="btn danger" data-a="clear-kg">Azzera tutti i kg (nuovo blocco)</button></div>
     <p class="note">Consiglio: esporta il backup prima di azzerare i kg o di cambiare scheda.</p>`;
+}
+
+
+/* ---------- import da Excel ---------- */
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  return new Promise((res, rej) => {
+    const sc = document.createElement("script");
+    sc.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    sc.onload = () => res(window.XLSX);
+    sc.onerror = () => rej(new Error("impossibile caricare il lettore Excel (rete?)"));
+    document.head.appendChild(sc);
+  });
+}
+// rows = matrice di celle del foglio. Layout atteso: intestazioni "Gruppo Muscolare", "Esercizio", "S1".."Sn"
+// (con eventuale colonna "kg" subito dopo ogni Sn), "Rest"; righe "GIORNO n" come separatori.
+function rowsToPlan(rows, title) {
+  const cl = (v) => String(v ?? "").trim();
+  const hi = rows.findIndex((r) => r.some((c) => /^esercizio$/i.test(cl(c))) && r.some((c) => /^s\d+$/i.test(cl(c))));
+  if (hi < 0) throw new Error("non trovo l'intestazione: servono le colonne 'Esercizio' e 'S1', 'S2'...");
+  const H = rows[hi].map(cl);
+  const cEx = H.findIndex((h) => /^esercizio$/i.test(h));
+  const cGr = H.findIndex((h) => /^gruppo/i.test(h));
+  const cRest = H.findIndex((h) => /^(rest|recupero)/i.test(h));
+  if (cGr < 0) throw new Error("manca la colonna 'Gruppo Muscolare'");
+  const wk = [];
+  H.forEach((h, i) => { if (/^s\d+$/i.test(h)) wk.push({ c: i, kg: /^kg$/i.test(H[i + 1] || "") ? i + 1 : -1 }); });
+  const lib = clone(plan.library), days = [], kg = {};
+  let cur = null, nRows = 0, newEx = 0; const newGroups = new Set();
+  const canon = (g) => groupsList().concat(Object.keys(lib)).find((x) => x.toLowerCase() === g.toLowerCase())
+    || g.charAt(0).toUpperCase() + g.slice(1);
+  for (const r of rows.slice(hi + 1)) {
+    const a = cl(r[0]), g = cl(r[cGr]), ex = cl(r[cEx]);
+    if (/^giorno/i.test(a) || /^giorno/i.test(g)) {
+      cur = { name: (a || g).toLowerCase().replace(/^./, (c) => c.toUpperCase()), rows: [] }; days.push(cur); continue;
+    }
+    if (!g || !ex) continue;
+    if (!cur) { cur = { name: "Giorno 1", rows: [] }; days.push(cur); }
+    const group = canon(g), id = newId();
+    if (!lib[group]) { lib[group] = []; newGroups.add(group); }
+    if (!lib[group].some((x) => x.toLowerCase() === ex.toLowerCase())) { lib[group].push(ex); newEx++; }
+    wk.forEach((w, i) => { if (w.kg >= 0) { const v = cl(r[w.kg]).replace(/^(\d+)\.0$/, "$1"); if (v) kg[`${id}_${i}`] = v; } });
+    cur.rows.push({ id, group, ex, scheme: wk.map((w) => cl(r[w.c])), rest: cRest >= 0 ? cl(r[cRest]) : "" });
+    nRows++;
+  }
+  if (!nRows) throw new Error("nessun esercizio trovato sotto l'intestazione");
+  return { title, weeks: wk.length, days, library: lib, kg, nRows, newEx, newGroups: [...newGroups] };
+}
+async function applyImport(p) {
+  plan = normalize({ ...clone(plan), ...clone(p) }); ui.day = 0; ui.week = 0; ui.edit = false; render();
+  const { nRows, newEx, newGroups, ...data } = p;
+  await setDoc(ref, clone({ ...plan, ...data }));
+}
+async function importFile(file) {
+  const ext = file.name.split(".").pop().toLowerCase();
+  const baseTitle = file.name.replace(/\.[^.]+$/, "").replace(/_/g, " ");
+  if (ext === "json") {
+    const data = JSON.parse(await file.text());
+    if (!Array.isArray(data.days)) throw new Error("file non valido (manca 'days')");
+    if (!confirm("Sostituire la scheda attuale con quella del file?")) return;
+    plan = normalize({ ...data, createdAt: Date.now() }); ui.day = 0; ui.week = 0; render();
+    await setDoc(ref, clone(plan)); return;
+  }
+  if (!["xlsx", "xlsm", "xls"].includes(ext)) throw new Error("formato non supportato (usa .xlsx, .xlsm o .json)");
+  const X = await loadXlsx();
+  const wb = X.read(await file.arrayBuffer(), { type: "array" });
+  const sheet = wb.SheetNames.find((n) => /programma/i.test(n)) || wb.SheetNames[0];
+  const rows = X.utils.sheet_to_json(wb.Sheets[sheet], { header: 1, defval: "", raw: false });
+  const p = rowsToPlan(rows, baseTitle);
+  const nKg = Object.keys(p.kg).length;
+  if (!confirm(`Importare "${p.title}" dal foglio "${sheet}"?\n${p.days.length} giorni, ${p.nRows} esercizi, ${p.weeks} settimane` +
+      `${nKg ? `, ${nKg} kg` : ""}.\nSostituisce la scheda e i kg attuali (esporta prima un backup se ti servono).`)) return;
+  await applyImport(p);
+  toast(`Importati ${p.nRows} esercizi` + (p.newEx ? `, ${p.newEx} nuovi aggiunti alla libreria` : "") +
+        (p.newGroups.length ? `, nuovi gruppi: ${p.newGroups.join(", ")}` : ""));
 }
 
 /* ---------- azioni ---------- */
@@ -317,14 +393,7 @@ view.addEventListener("input", onInput);
 view.addEventListener("change", onChange);
 $("#importFile").addEventListener("change", async (e) => {
   const file = e.target.files[0]; e.target.value = ""; if (!file) return;
-  try {
-    const data = JSON.parse(await file.text());
-    if (!Array.isArray(data.days)) throw new Error("file non valido (manca 'days')");
-    if (!confirm("Sostituire la scheda attuale con quella del file?")) return;
-    const p = normalize({ ...data, createdAt: Date.now() });
-    await setDoc(ref, clone(p));
-    ui.day = 0; ui.week = 0;
-  } catch (err) { toast("Importazione non riuscita: " + err.message); }
+  try { await importFile(file); } catch (err) { toast("Importazione non riuscita: " + err.message); }
 });
 
 /* ---------- autenticazione e sync ---------- */
