@@ -1,0 +1,19 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+   function autorizzato() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in [
+          'kataxsecret@gmail.com',
+          'andyplay95@gmail.com'
+        ];
+    }
+
+    // Ognuno legge e scrive solo sotto il proprio uid.
+    match /users/{uid}/{document=**} {
+      allow read, write: if autorizzato() && request.auth.uid == uid;
+    }
+  }
+}
