@@ -142,7 +142,7 @@ function showLogin() {
     <button class="btn" data-a="login">Accedi con Google</button></div>`;
 }
 function showMsg(html) { nav.innerHTML = ""; renderHeader();
-  view.innerHTML = (user?.email === ADMIN_EMAIL ? renderAdminSection() : "") + `<div class="center">${html}</div>`; }
+  view.innerHTML = `<div class="center">${html}</div>`; }
 
 function showOnboarding() {
   showMsg(`<h1>Imposta Scheda</h1><p>Scegli da quale scheda partire per l'utente selezionato:</p>
@@ -161,17 +161,17 @@ function renderHeader() {
 function renderAdminSection() {
   if (user?.email !== ADMIN_EMAIL) return "";
   const isViewingOther = activeUid && activeUid !== user?.uid;
-  const currentAlias = Object.keys(aliasesCache).find(k => aliasesCache[k] === activeUid) || "";
-  return `<div class="admin-card">
+  const currentKey = Object.keys(aliasesCache).find(k => aliasesCache[k] === activeUid && k !== activeUid) || "";
+  return `<div class="admin-card" style="margin-top:20px;">
     <h3>Pannello Amministrazione Clienti</h3>
     <div class="erow">
-      <input type="text" id="adminTargetUid" placeholder="Inserisci UID o Alias" value="${isViewingOther ? esc(currentAlias || activeUid) : ""}" style="flex:1">
+      <input type="text" id="adminTargetUid" placeholder="Inserisci UID, Email o Alias" value="${isViewingOther ? esc(currentKey || activeUid) : ""}" style="flex:1">
       <button class="btn" data-a="admin-load">Carica Utente</button>
       ${isViewingOther ? `<button class="btn ghost" data-a="admin-reset">Torna alla Mia Scheda</button>` : ""}
     </div>
     ${isViewingOther ? `<div class="erow" style="margin-top:8px;justify-content:space-between;align-items:center">
-      <span class="note" style="color:var(--pri)">UID attivo: <b>${esc(activeUid)}</b>${currentAlias ? `(Alias: <b>${esc(currentAlias)}</b>)` : ""}</span>
-      <button class="btn ghost" data-a="set-alias" style="padding:4px 8px;font-size:12px">${currentAlias ? "Modifica Alias" : "+ Assegna Alias"}</button>
+      <span class="note" style="color:var(--pri)">UID effettivo: <b>${esc(activeUid)}</b></span>
+      <button class="btn ghost" data-a="set-alias" style="padding:4px 8px;font-size:12px">+ Associa Alias / Email</button>
     </div>` : ""}
   </div>`;
 }
@@ -181,8 +181,7 @@ function render() {
   rendered = true; renderHeader();
   nav.innerHTML = [["scheda", "Scheda"], ["calc", "Calcolatore"], ["opz", "Impostazioni"]]
     .map(([t, l]) => `<button data-a="tab" data-t="${t}" class="${ui.tab === t ? "on" : ""}">${l}</button>`).join("");
-  view.innerHTML = (user?.email === ADMIN_EMAIL ? renderAdminSection() : "") +
-    (ui.tab === "scheda" ? viewScheda() : ui.tab === "calc" ? viewCalc() : viewOpz());
+  view.innerHTML = (ui.tab === "scheda" ? viewScheda() : ui.tab === "calc" ? viewCalc() : viewOpz());
   if (ui.tab === "calc") updateCalc();
 }
 
@@ -299,17 +298,17 @@ function viewOpz() {
     <div class="sec">Dati ed Esportazione / Importazione</div>
     <div class="erow">
       <button class="btn" data-a="export-excel">Esporta Excel (.xlsx)</button>
-      <button class="btn ghost" data-a="import-excel">Importa Excel (.xlsx / .xlsm)</button>
+      <button class="btn ghost" data-a="export">Esporta backup (JSON)</button>
     </div>
     <div class="erow">
-      <button class="btn ghost" data-a="export">Esporta backup (JSON)</button>
-      <button class="btn ghost" data-a="import">Importa backup (JSON)</button>
+      <button class="btn ghost" data-a="import-file">Importa file (Excel / JSON)</button>
     </div>
     <div class="erow"><button class="btn danger" data-a="clear-kg">Azzera tutti i kg (nuovo blocco)</button></div>
-    <p class="note">Puoi caricare direttamente un file Excel (.xlsx o .xlsm) per impostare la scheda dell'utente.</p>`;
+    <p class="note">Puoi caricare file Excel (.xlsx, .xlsm, .xls) o backup in formato JSON.</p>
+    ${renderAdminSection()}`;
 }
 
-/* ---------- esportazione / importazione excel ---------- */
+/* ---------- esportazione / importazione excel e json ---------- */
 function exportToExcel() {
   if (typeof XLSX === "undefined") return toast("Libreria XLSX in caricamento...");
   const wb = XLSX.utils.book_new();
@@ -457,7 +456,7 @@ async function parseAndImportExcel(file) {
         const scheme = Array(weeksCount).fill("");
         const rowId = newId();
 
-        let restVal = "1'30\"";
+        let restVal = "1'30\\\"";
         if (restColIdx !== -1 && row[restColIdx] !== undefined && row[restColIdx] !== "") {
           restVal = String(row[restColIdx]).trim();
         }
@@ -547,7 +546,7 @@ async function parseAndImportExcel(file) {
     hist.undo = []; hist.redo = []; hist.typing = null;
     ui.day = 0; ui.week = 0;
     render();
-    toast("Scheda, carichi e Calcolatore importati con successo!");
+    toast("Scheda Excel importata con successo!");
   } catch (err) {
     console.error(err);
     toast("Errore durante l'importazione dell'Excel: " + err.message);
@@ -581,9 +580,10 @@ async function listenToUid(targetInput) {
   await loadAliases();
   
   const cleanTarget = targetInput.trim();
-  const lowerAlias = cleanTarget.toLowerCase();
+  const lowerTarget = cleanTarget.toLowerCase();
   
-  const targetUid = aliasesCache[lowerAlias] || aliasesCache[cleanTarget] || cleanTarget;
+  // Risoluzione unificata: cerca per alias, email o usa direttamente l'UID
+  const targetUid = aliasesCache[lowerTarget] || aliasesCache[cleanTarget] || cleanTarget;
   
   activeUid = targetUid;
   rendered = false;
@@ -625,7 +625,7 @@ async function handleAction(a, t) {
     case "logout": await signOut(auth); return;
     case "admin-load": {
       const target = ($("#adminTargetUid")?.value || "").trim();
-      if (!target) return toast("Inserisci un UID o un Alias valido.");
+      if (!target) return toast("Inserisci un UID, un'Email o un Alias valido.");
       listenToUid(target);
       return;
     }
@@ -634,15 +634,15 @@ async function handleAction(a, t) {
       return;
     case "set-alias": {
       if (!activeUid || activeUid === user?.uid) return toast("Seleziona prima la scheda di un cliente.");
-      const currentAlias = Object.keys(aliasesCache).find(k => aliasesCache[k] === activeUid) || "";
-      const newAlias = (prompt("Inserisci un alias/nome semplice per questo utente (es. alessandro):", currentAlias) || "").trim();
-      if (!newAlias) return;
+      const inputStr = (prompt("Inserisci un Alias o l'Email da associare a questo utente (es. alessandro o nome@email.com):") || "").trim();
+      if (!inputStr) return;
       
-      const lowerNew = newAlias.toLowerCase();
-      aliasesCache[lowerNew] = activeUid;
+      const lowerKey = inputStr.toLowerCase();
+      aliasesCache[lowerKey] = activeUid;
+      aliasesCache[inputStr] = activeUid;
       try {
         await setDoc(doc(db, "admin", "aliases"), aliasesCache, { merge: true });
-        toast(`Alias "${newAlias}" associato con successo all'utente!`);
+        toast(`Associazione "${inputStr}" salvata con successo per l'utente!`);
         render();
       } catch (err) {
         onErr(err);
@@ -686,11 +686,10 @@ async function handleAction(a, t) {
     }
     case "lib-del": pushUndo(); plan.library[t.dataset.g].splice(+t.dataset.i, 1); saveStruct(); break;
     case "export-excel": exportToExcel(); return;
-    case "import-excel": $("#importExcelFile").click(); return;
     case "export": download(`scheda-${new Date().toISOString().slice(0, 10)}.json`,
       JSON.stringify(clone({ title: plan.title, weeks: plan.weeks, days: plan.days,
         library: plan.library, rm: plan.rm, kg: plan.kg }), null, 1)); return;
-    case "import": $("#importFile").click(); return;
+    case "import-file": $("#importFile").click(); return;
     case "clear-kg":
       if (!confirm("Azzerare TUTTI i kg segnati?")) return;
       Object.keys(plan.kg).forEach((k) => save({ ["kg." + k]: deleteField() })); plan.kg = {}; break;
@@ -742,21 +741,28 @@ view.addEventListener("focusout", () => { hist.typing = null; });
 
 $("#importFile").addEventListener("change", async (e) => {
   const file = e.target.files[0]; e.target.value = ""; if (!file) return;
-  try {
-    const data = JSON.parse(await file.text());
-    if (!Array.isArray(data.days)) throw new Error("file non valido (manca 'days')");
-    if (!confirm("Sostituire la scheda attuale con quella del file?")) return;
-    const p = normalize({ ...data, createdAt: Date.now() });
-    await setDoc(ref, clone(p));
-    hist.undo = []; hist.redo = []; hist.typing = null;
-    ui.day = 0; ui.week = 0;
-  } catch (err) { toast("Importazione non riuscita: " + err.message); }
-});
-
-$("#importExcelFile").addEventListener("change", async (e) => {
-  const file = e.target.files[0]; e.target.value = ""; if (!file) return;
-  if (!confirm(`Importare la scheda, i carichi ed il Calcolatore dal file Excel "${file.name}" per l'utente attivo?`)) return;
-  await parseAndImportExcel(file);
+  const fileName = file.name.toLowerCase();
+  
+  if (fileName.endsWith(".xlsx") || fileName.endsWith(".xlsm") || fileName.endsWith(".xls")) {
+    if (!confirm(`Importare la scheda, i carichi ed il Calcolatore dal file Excel "${file.name}" per l'utente attivo?`)) return;
+    await parseAndImportExcel(file);
+  } else if (fileName.endsWith(".json")) {
+    try {
+      const data = JSON.parse(await file.text());
+      if (!Array.isArray(data.days)) throw new Error("file non valido (manca 'days')");
+      if (!confirm("Sostituire la scheda attuale con quella del file JSON?")) return;
+      const p = normalize({ ...data, createdAt: Date.now() });
+      await setDoc(ref, clone(p));
+      hist.undo = []; hist.redo = []; hist.typing = null;
+      ui.day = 0; ui.week = 0;
+      render();
+      toast("Backup JSON importato con successo!");
+    } catch (err) {
+      toast("Importazione JSON non riuscita: " + err.message);
+    }
+  } else {
+    toast("Formato file non supportato. Seleziona un file Excel (.xlsx/.xlsm) o JSON.");
+  }
 });
 
 /* ---------- autenticazione e sync ---------- */
