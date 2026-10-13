@@ -2,7 +2,8 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-         doc, getDoc, setDoc, updateDoc, deleteField, onSnapshot }
+         doc, getDoc, setDoc, updateDoc, deleteField, onSnapshot,
+         collection, query, where, limit, getDocs, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 import { SEED_DAYS, SEED_LIBRARY } from "./seed.js";
@@ -32,7 +33,7 @@ const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
 });
 let user = null, activeUid = null, ref = null, unsub = null, plan = null, rendered = false;
-let aliasesCache = {};
+let dirCache = [];   // solo admin: [{uid, email, name, alias}]
 const ui = { tab: "scheda", day: 0, week: 0, edit: false };
 const timers = new Map();
 
@@ -89,8 +90,12 @@ function onErr(e) {
 }
 function save(fields) { return updateDoc(ref, fields).catch(onErr); }
 function debounced(key, ms, fn) {
-  clearTimeout(timers.get(key));
-  timers.set(key, setTimeout(() => { timers.delete(key); fn(); }, ms));
+  clearTimeout(timers.get(key)?.id);
+  timers.set(key, { fn, id: setTimeout(() => { timers.delete(key); fn(); }, ms) });
+}
+function flushSaves() {            // da chiamare PRIMA di cambiare ref/plan
+  const pending = [...timers.values()]; timers.clear();
+  pending.forEach(({ id, fn }) => { clearTimeout(id); fn(); });
 }
 const saveKg = (key, val) => debounced("kg" + key, 500,
   () => save({ ["kg." + key]: val === "" ? deleteField() : val }));
@@ -161,11 +166,13 @@ function renderHeader() {
 function renderAdminSection() {
   if (user?.email !== ADMIN_EMAIL) return "";
   const isViewingOther = activeUid && activeUid !== user?.uid;
-  const currentKey = Object.keys(aliasesCache).find(k => aliasesCache[k] === activeUid && k !== activeUid) || "";
+  const cur = dirCache.find((x) => x.uid === activeUid);
+  const currentKey = cur?.email || cur?.alias || "";
   return `<div class="admin-card" style="margin-top:20px;">
     <h3>Pannello Amministrazione Clienti</h3>
     <div class="erow">
-      <input type="text" id="adminTargetUid" placeholder="Inserisci UID, Email o Alias" value="${isViewingOther ? esc(currentKey || activeUid) : ""}" style="flex:1">
+      <input type="text" id="adminTargetUid" list="adminUsers" placeholder="Email, alias o UID" value="${isViewingOther ? esc(currentKey || activeUid) : ""}" style="flex:1">
+      <datalist id="adminUsers"></datalist>
       <button class="btn" data-a="admin-load">Carica Utente</button>
       ${isViewingOther ? `<button class="btn ghost" data-a="admin-reset">Torna alla Mia Scheda</button>` : ""}
     </div>
@@ -183,6 +190,7 @@ function render() {
     .map(([t, l]) => `<button data-a="tab" data-t="${t}" class="${ui.tab === t ? "on" : ""}">${l}</button>`).join("");
   view.innerHTML = (ui.tab === "scheda" ? viewScheda() : ui.tab === "calc" ? viewCalc() : viewOpz());
   if (ui.tab === "calc") updateCalc();
+  if (ui.tab === "opz") fillDirList();
 }
 
 /* --- scheda --- */
@@ -332,7 +340,8 @@ function exportToExcel() {
         row.push(r.scheme[w] || "");
         const ser = seriesOf(r.scheme[w]);
         if (ser) {
-          const kgs = ser.map((_, si) => plan.kg[kgKey(r.id, w, si)] || "").filter(Boolean).join("/");
+          const arr = ser.map((_, si) => plan.kg[kgKey(r.id, w, si)] || "");
+          const kgs = arr.some(Boolean) ? arr.join("/") : "";
           row.push(kgs);
         } else {
           row.push(plan.kg[kgKey(r.id, w, 0)] || "");
@@ -438,6 +447,7 @@ async function parseAndImportExcel(file) {
     let currentDay = null;
     let weeksCount = weekMap.length > 0 ? Math.max(...weekMap.map(w => w.weekIdx)) + 1 : 5;
 
+    const unknownGroups = new Set();
     for (let i = headerRowIdx + 1; i < rows.length; i++) {
       const row = rows[i];
       if (!row || row.length === 0) continue;
@@ -456,7 +466,7 @@ async function parseAndImportExcel(file) {
         const scheme = Array(weeksCount).fill("");
         const rowId = newId();
 
-        let restVal = "1'30\"";
+        let restVal = "";
         if (restColIdx !== -1 && row[restColIdx] !== undefined && row[restColIdx] !== "") {
           restVal = String(row[restColIdx]).trim();
         }
@@ -483,7 +493,7 @@ async function parseAndImportExcel(file) {
 
         currentDay.rows.push({
           id: rowId,
-          group: GROUPS.includes(group) ? group : "Petto",
+          group: GROUPS.find((g) => g.toLowerCase() === group.toLowerCase()) || (unknownGroups.add(group), "Petto"),
           ex: ex,
           scheme: scheme,
           rest: restVal
@@ -497,11 +507,13 @@ async function parseAndImportExcel(file) {
     if (workbook.Sheets['Libreria Esercizi']) {
       const libSheet = XLSX.utils.sheet_to_json(workbook.Sheets['Libreria Esercizi'], { header: 1 });
       if (libSheet && libSheet.length > 1) {
-        const headers = libSheet[0].map(h => String(h || "").trim());
+        let libHdr = libSheet.findIndex((row, i) => i < 6 && (row || []).filter((c) => GROUPS.includes(String(c || "").trim())).length >= 2);
+        if (libHdr < 0) libHdr = 0;
+        const headers = (libSheet[libHdr] || []).map(h => String(h || "").trim());
         headers.forEach((h, colIdx) => {
           if (GROUPS.includes(h)) {
             const list = [];
-            for (let r = 1; r < libSheet.length; r++) {
+            for (let r = libHdr + 1; r < libSheet.length; r++) {
               const val = String(libSheet[r][colIdx] || "").trim();
               if (val) list.push(val);
             }
@@ -546,7 +558,9 @@ async function parseAndImportExcel(file) {
     hist.undo = []; hist.redo = []; hist.typing = null;
     ui.day = 0; ui.week = 0;
     render();
-    toast("Scheda Excel importata con successo!");
+    toast("Scheda Excel importata con successo!" + (unknownGroups.size
+      ? " Gruppi non riconosciuti messi in Petto: " + [...unknownGroups].join(", ")
+      : ""));
   } catch (err) {
     console.error(err);
     toast("Errore durante l'importazione dell'Excel: " + err.message);
@@ -565,46 +579,72 @@ function download(name, text) {
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-async function loadAliases() {
+const isAdminUser = () => user?.email === ADMIN_EMAIL;
+
+function registerLogin(u) {   // ad ogni accesso: riallinea UID <-> email (obbligatorio, verificato dalle regole)
+  return setDoc(doc(db, "directory", u.uid), {
+    email: u.email || "", emailLower: (u.email || "").toLowerCase(),
+    name: u.displayName || "", lastLogin: serverTimestamp()
+  }, { merge: true });
+}
+function showSyncError(e) {
+  console.error("directory:", e);
+  showMsg(`<h1>Accesso non verificato</h1><p>Non riesco a collegare il tuo account (UID ed email): ${
+    e?.code === "permission-denied" ? "permesso negato dalle regole Firestore" : esc(e?.message || e)}.</p>
+    <p class="note">Riprova ad accedere. Se continua, avvisa l'amministratore.</p>`);
+}
+async function loadDirectory() {
+  if (!isAdminUser()) return;
   try {
-    const snap = await getDoc(doc(db, "admin", "aliases"));
-    aliasesCache = snap.exists() ? snap.data() : {};
-  } catch (e) {
-    aliasesCache = {};
-  }
+    dirCache = (await getDocs(collection(db, "directory"))).docs.map((d) => ({ uid: d.id, ...d.data() }));
+  } catch (e) { dirCache = []; console.warn("directory:", e.code || e); }
+  fillDirList();
+}
+function fillDirList() {
+  const dl = $("#adminUsers"); if (!dl) return;
+  dl.innerHTML = dirCache.map((x) => `<option value="${esc(x.email || x.alias || x.uid)}">${esc([x.name, x.alias].filter(Boolean).join(" · "))}</option>`).join("");
+}
+async function resolveUser(input) {
+  const raw = input.trim(), low = raw.toLowerCase();
+  if (!raw || raw.includes("/")) return null;
+  const find = async (field, val) => {
+    const s = await getDocs(query(collection(db, "directory"), where(field, "==", val), limit(1)));
+    return s.empty ? null : { uid: s.docs[0].id, ...s.docs[0].data() };
+  };
+  if (raw.includes("@")) return find("emailLower", low);
+  const byAlias = await find("aliasLower", low);
+  if (byAlias) return byAlias;
+  const d = await getDoc(doc(db, "directory", raw));          // UID
+  if (d.exists()) return { uid: d.id, ...d.data() };
+  const p = await getDoc(doc(db, "users", raw, "plan", "main")); // UID di utenti precedenti alla directory
+  return p.exists() ? { uid: raw } : null;
 }
 
-async function listenToUid(targetInput) {
+async function listenToUid(uid) {
+  flushSaves();                                   // salva sul vecchio riferimento prima di cambiare
   if (unsub) { unsub(); unsub = null; }
-  
-  await loadAliases();
-  
-  const cleanTarget = targetInput.trim();
-  const lowerTarget = cleanTarget.toLowerCase();
-  
-  const targetUid = aliasesCache[lowerTarget] || aliasesCache[cleanTarget] || cleanTarget;
-  
-  activeUid = targetUid;
-  rendered = false;
-  
-  ref = doc(db, "users", activeUid, "plan", "main");
+  plan = null; rendered = false;
+  hist.undo = []; hist.redo = []; hist.typing = null;
+  activeUid = uid;
+  ref = doc(db, "users", uid, "plan", "main");
   showMsg("<p>Caricamento scheda in corso...</p>");
-  
   unsub = onSnapshot(ref, (snap) => {
     if (!snap.exists()) {
-      showOnboarding();
+      if (snap.metadata.fromCache) showMsg("<p>Connessione in corso...</p>"); else showOnboarding();
       return;
     }
-    
+    if (rendered) {
+      if (snap.metadata.hasPendingWrites || timers.size) return;
+      const a = document.activeElement;
+      if (a && view.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return;
+    }
     plan = normalize(snap.data());
     render();
   }, (err) => {
     console.error("Firestore Error:", err);
-    showMsg(`<h1>Accesso fallito</h1><p>${
-      err.code === "permission-denied"
-        ? "Impossibile accedere alla scheda richiesta."
-        : esc(err.message)
-    }</p><button class="btn" data-a="admin-reset">Torna alla Mia Scheda</button>`);
+    showMsg(`<h1>Accesso fallito</h1><p>${err.code === "permission-denied"
+      ? "Impossibile accedere alla scheda richiesta." : esc(err.message)}</p>
+      <button class="btn" data-a="admin-reset">Torna alla Mia Scheda</button>`);
   });
 }
 
@@ -620,28 +660,26 @@ async function handleAction(a, t) {
     case "logout": await signOut(auth); return;
     case "admin-load": {
       const target = ($("#adminTargetUid")?.value || "").trim();
-      if (!target) return toast("Inserisci un UID, un'Email o un Alias valido.");
-      listenToUid(target);
+      if (!target) return toast("Inserisci email, alias o UID.");
+      try {
+        const found = await resolveUser(target);
+        if (!found) return toast(`Nessun utente per "${target}". Deve aver fatto almeno un accesso.`);
+        listenToUid(found.uid);
+      } catch (e) { onErr(e); }
       return;
     }
-    case "admin-reset":
-      if (user) listenToUid(user.uid);
-      return;
+    case "admin-reset": if (user) listenToUid(user.uid); return;
     case "set-alias": {
-      if (!activeUid || activeUid === user?.uid) return toast("Seleziona prima la scheda di un cliente.");
-      const inputStr = (prompt("Inserisci un Alias o l'Email da associare a questo utente (es. alessandro o nome@email.com):") || "").trim();
-      if (!inputStr) return;
-      
-      const lowerKey = inputStr.toLowerCase();
-      aliasesCache[lowerKey] = activeUid;
-      aliasesCache[inputStr] = activeUid;
+      if (!activeUid || activeUid === user?.uid) return toast("Apri prima la scheda di un cliente.");
+      const al = (prompt("Alias da associare a questo utente (es. alessandro):") || "").trim();
+      if (!al) return;
+      if (al.includes("@") || al.includes("/")) return toast("L'alias non puo' contenere '@' o '/'.");
       try {
-        await setDoc(doc(db, "admin", "aliases"), aliasesCache, { merge: true });
-        toast(`Associazione "${inputStr}" salvata con successo per l'utente!`);
-        render();
-      } catch (err) {
-        onErr(err);
-      }
+        const clash = await getDocs(query(collection(db, "directory"), where("aliasLower", "==", al.toLowerCase()), limit(1)));
+        if (!clash.empty && clash.docs[0].id !== activeUid) return toast("Alias gia' usato da un altro utente.");
+        await setDoc(doc(db, "directory", activeUid), { alias: al, aliasLower: al.toLowerCase() }, { merge: true });
+        toast(`Alias "${al}" salvato.`); await loadDirectory(); render();
+      } catch (e) { onErr(e); }
       return;
     }
     case "seed": case "empty":
@@ -764,21 +802,19 @@ $("#importFile").addEventListener("change", async (e) => {
 onAuthStateChanged(auth, async (u) => {
   user = u; plan = null; rendered = false;
   hist.undo = []; hist.redo = []; hist.typing = null;
-  if (!u) { if (unsub) unsub(); showLogin(); return; }
-  
-  await loadAliases();
-  
-  if (u.email && u.email !== ADMIN_EMAIL) {
-    const emailLower = u.email.toLowerCase();
-    if (aliasesCache[emailLower] !== u.uid) {
-      aliasesCache[emailLower] = u.uid;
-      try {
-        await setDoc(doc(db, "admin", "aliases"), aliasesCache, { merge: true });
-      } catch (e) {
-        console.error("Errore salvataggio automatico email-UID:", e);
-      }
-    }
+  if (!u) {
+    if (unsub) { unsub(); unsub = null; }
+    timers.forEach(({ id }) => clearTimeout(id)); timers.clear();
+    ref = null; activeUid = null; dirCache = [];
+    showLogin(); return;
   }
-
+  showMsg("<p>Verifica account in corso...</p>");
+  try {   // la scheda si apre solo dopo che UID ed email sono stati registrati/riverificati
+    const sync = registerLogin(u);
+    const esito = await Promise.race([sync.then(() => "ok"), new Promise((r) => setTimeout(() => r("lento"), 6000))]);
+    if (esito === "lento") sync.catch(showSyncError);   // offline: si procede dalla cache, la verifica parte appena torna la rete
+  } catch (e) { showSyncError(e); return; }
+  if (user !== u) return;                                // nel frattempo c'e' stato un logout/cambio account
+  loadDirectory();
   listenToUid(u.uid);
 });
