@@ -170,7 +170,7 @@ function renderAdminSection() {
       ${isViewingOther ? `<button class="btn ghost" data-a="admin-reset">Torna alla Mia Scheda</button>` : ""}
     </div>
     ${isViewingOther ? `<div class="erow" style="margin-top:8px;justify-content:space-between;align-items:center">
-      <span class="note" style="color:var(--pri)">UID attivo: <b>${esc(activeUid)}</b> ${currentAlias ? `(Alias: <b>${esc(currentAlias)}</b>)` : ""}</span>
+      <span class="note" style="color:var(--pri)">UID attivo: <b>${esc(activeUid)}</b>${currentAlias ? `(Alias: <b>${esc(currentAlias)}</b>)` : ""}</span>
       <button class="btn ghost" data-a="set-alias" style="padding:4px 8px;font-size:12px">${currentAlias ? "Modifica Alias" : "+ Assegna Alias"}</button>
     </div>` : ""}
   </div>`;
@@ -322,10 +322,11 @@ function exportToExcel() {
     header.push(`S${w}`);
     header.push("kg");
   }
+  header.push("Rest");
   sheetData.push(header);
 
   plan.days.forEach((day) => {
-    sheetData.push([day.name.toUpperCase(), "", ...Array(plan.weeks * 2).fill("")]);
+    sheetData.push([day.name.toUpperCase(), "", ...Array(plan.weeks * 2 + 1).fill("")]);
     day.rows.forEach((r) => {
       const row = [r.group || "", r.ex || ""];
       for (let w = 0; w < plan.weeks; w++) {
@@ -338,6 +339,7 @@ function exportToExcel() {
           row.push(plan.kg[kgKey(r.id, w, 0)] || "");
         }
       }
+      row.push(r.rest || "");
       sheetData.push(row);
     });
   });
@@ -404,12 +406,40 @@ async function parseAndImportExcel(file) {
       if (titleStr.includes("PROGRAMMA ATTUALE")) title = titleStr.replace("PROGRAMMA ATTUALE — ", "").split(" — ")[0] || "Scheda Importata";
     }
 
+    let headerRowIdx = 1;
+    if (rows.length > 1 && !String(rows[1][0] || "").toLowerCase().includes("gruppo")) {
+      for (let i = 0; i < Math.min(rows.length, 5); i++) {
+        const rStr = JSON.stringify(rows[i]).toLowerCase();
+        if (rStr.includes("gruppo") || rStr.includes("esercizio") || rStr.includes("s1")) {
+          headerRowIdx = i;
+          break;
+        }
+      }
+    }
+
+    const headerRow = rows[headerRowIdx] || [];
+    const weekMap = [];
+    let restColIdx = -1;
+
+    headerRow.forEach((h, idx) => {
+      const text = String(h || "").trim().toUpperCase();
+      if (text.startsWith("S") && !isNaN(text.slice(1))) {
+        const wNum = parseInt(text.slice(1)) - 1;
+        const nextColText = String(headerRow[idx + 1] || "").trim().toLowerCase();
+        const kgCol = (nextColText === "kg") ? idx + 1 : -1;
+        weekMap.push({ weekIdx: wNum, colS: idx, colKg: kgCol });
+      }
+      if (text === "REST" || text === "RECUPERO") {
+        restColIdx = idx;
+      }
+    });
+
     const importedDays = [];
     const importedKg = {};
     let currentDay = null;
-    let weeksCount = 5;
+    let weeksCount = weekMap.length > 0 ? Math.max(...weekMap.map(w => w.weekIdx)) + 1 : 5;
 
-    for (let i = 0; i < rows.length; i++) {
+    for (let i = headerRowIdx + 1; i < rows.length; i++) {
       const row = rows[i];
       if (!row || row.length === 0) continue;
 
@@ -424,39 +454,40 @@ async function parseAndImportExcel(file) {
       if (currentDay && row.length >= 2 && row[1]) {
         const group = firstCol || "Petto";
         const ex = String(row[1] || "").trim();
-        const scheme = [];
+        const scheme = Array(weeksCount).fill("");
         const rowId = newId();
 
-        let wIndex = 0;
-        for (let c = 2; c < row.length; c += 2) {
-          const schVal = String(row[c] ?? "").trim();
-          const kgVal = String(row[c + 1] ?? "").trim();
-          
-          scheme.push(schVal);
-
-          if (kgVal) {
-            const ser = seriesOf(schVal);
-            if (ser && kgVal.includes("/")) {
-              const kgParts = kgVal.split("/").map(x => x.trim());
-              kgParts.forEach((kv, si) => {
-                if (kv) importedKg[kgKey(rowId, wIndex, si)] = kv;
-              });
-            } else {
-              importedKg[kgKey(rowId, wIndex, 0)] = kgVal;
-            }
-          }
-          wIndex++;
+        let restVal = "1'30\"";
+        if (restColIdx !== -1 && row[restColIdx] !== undefined && row[restColIdx] !== "") {
+          restVal = String(row[restColIdx]).trim();
         }
 
-        while (scheme.length < weeksCount) scheme.push("");
-        if (scheme.length > weeksCount) weeksCount = scheme.length;
+        weekMap.forEach(({ weekIdx, colS, colKg }) => {
+          const schVal = String(row[colS] ?? "").trim();
+          scheme[weekIdx] = schVal;
+
+          if (colKg !== -1) {
+            const kgVal = String(row[colKg] ?? "").trim();
+            if (kgVal) {
+              const ser = seriesOf(schVal);
+              if (ser && kgVal.includes("/")) {
+                const kgParts = kgVal.split("/").map(x => x.trim());
+                kgParts.forEach((kv, si) => {
+                  if (kv) importedKg[kgKey(rowId, weekIdx, si)] = kv;
+                });
+              } else {
+                importedKg[kgKey(rowId, weekIdx, 0)] = kgVal;
+              }
+            }
+          }
+        });
 
         currentDay.rows.push({
           id: rowId,
           group: GROUPS.includes(group) ? group : "Petto",
           ex: ex,
           scheme: scheme,
-          rest: "1'30\""
+          rest: restVal
         });
       }
     }
@@ -540,7 +571,6 @@ async function loadAliases() {
     const snap = await getDoc(doc(db, "admin", "aliases"));
     aliasesCache = snap.exists() ? snap.data() : {};
   } catch (e) {
-    // Normal users don't have read access to admin/aliases, which is expected
     aliasesCache = {};
   }
 }
