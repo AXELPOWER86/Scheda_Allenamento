@@ -470,6 +470,7 @@ function listenToUid(targetId) {
   
   const safePathId = targetId.trim().toLowerCase().replace(/[@.]/g, "_");
   activeUid = safePathId;
+  rendered = false;
   
   ref = doc(db, "users", activeUid, "plan", "main");
   showMsg("<p>Caricamento scheda in corso...</p>");
@@ -515,10 +516,12 @@ async function handleAction(a, t) {
     case "admin-load": {
       const target = ($("#adminTargetUid")?.value || "").trim();
       if (!target) return toast("Inserisci un Email o UID valido.");
+      document.activeElement?.blur();
       listenToUid(target);
       return;
     }
     case "admin-reset":
+      document.activeElement?.blur();
       if (user) listenToUid(user.uid);
       return;
     case "seed": case "empty":

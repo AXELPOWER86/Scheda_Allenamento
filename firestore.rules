@@ -2,14 +2,12 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Lista delle email autorizzate ad accedere al sito.
     function isEmailAutorizzata() {
       return request.auth != null 
         && request.auth.token.email_verified == true
         && request.auth.token.email in [
           'kataxsecret@gmail.com',
-          'andyplay95@gmail.com',
-          'cliente2@gmail.com'
+          'andyplay95@gmail.com'
         ];
     }
 
