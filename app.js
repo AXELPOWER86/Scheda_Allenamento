@@ -241,7 +241,7 @@ function exOptions(r) {
   const list = [...(plan.library[r.group] || [])];
   if (r.ex && !inLib(r.group, r.ex)) list.unshift(r.ex);
   return `<option value="">- scegli -</option>` +
-    list.map((x) => `<option ${x === r.ex ? "selected" : ""}>${esc(x)}</option>`).join("") +
+    list.map((x) => `<option ${x === r.ex ? "selected" : ""}>${esc(x)}</option>`) +
     `<option value="__new">+ Nuovo esercizio...</option>`;
 }
 
@@ -468,7 +468,11 @@ function download(name, text) {
 function listenToUid(targetId) {
   if (unsub) { unsub(); unsub = null; }
   
-  const safePathId = targetId.trim().toLowerCase().replace(/[@.]/g, "_");
+  const isEmail = targetId.includes("@");
+  const safePathId = isEmail 
+    ? targetId.trim().toLowerCase().replace(/[@.]/g, "_") 
+    : targetId.trim();
+    
   activeUid = safePathId;
   rendered = false;
   
@@ -483,12 +487,6 @@ function listenToUid(targetId) {
         showOnboarding();
       }
       return;
-    }
-    
-    if (rendered) {
-      if (snap.metadata.hasPendingWrites || timers.size) return;
-      const a = document.activeElement;
-      if (a && view.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return;
     }
     
     plan = normalize(snap.data());
@@ -516,12 +514,12 @@ async function handleAction(a, t) {
     case "admin-load": {
       const target = ($("#adminTargetUid")?.value || "").trim();
       if (!target) return toast("Inserisci un Email o UID valido.");
-      document.activeElement?.blur();
+      if (document.activeElement) document.activeElement.blur();
       listenToUid(target);
       return;
     }
     case "admin-reset":
-      document.activeElement?.blur();
+      if (document.activeElement) document.activeElement.blur();
       if (user) listenToUid(user.uid);
       return;
     case "seed": case "empty":
