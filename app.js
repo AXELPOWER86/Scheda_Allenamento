@@ -149,7 +149,6 @@ function showOnboarding() {
 }
 function renderHeader() {
   const isAdmin = user?.email === ADMIN_EMAIL;
-  const isViewingOther = activeUid && activeUid !== user?.uid;
   hdr.innerHTML = `<b>${esc(plan?.title || "Scheda allenamento")}</b>
     <div><span>${esc((user?.displayName || user?.email || "").split(" ")[0])}${isAdmin ? " (Admin)" : ""}</span>
     <button data-a="logout">Esci</button></div>`;
@@ -165,7 +164,7 @@ function renderAdminSection() {
       <button class="btn" data-a="admin-load">Carica Utente</button>
       ${isViewingOther ? `<button class="btn ghost" data-a="admin-reset">Torna alla Mia Scheda</button>` : ""}
     </div>
-    ${isViewingOther ? `<p class="note" style="color:var(--pri)"> Stai gestendo la scheda dell'utente: <b>${esc(activeUid)}</b></p>` : ""}
+    ${isViewingOther ? `<p class="note" style="color:var(--pri)">Stai gestendo la scheda dell'utente: <b>${esc(activeUid)}</b></p>` : ""}
   </div>`;
 }
 
@@ -299,34 +298,34 @@ function viewOpz() {
     <p class="note">Consiglio: esporta la scheda prima di azzerare i kg o di cambiare mesociclo.</p>`;
 }
 
-/* ---------- esportazione excel ---------- */
+/* ---------- esportazione excel strutturata come il template originale ---------- */
 function exportToExcel() {
   if (typeof XLSX === "undefined") {
     toast("Libreria XLSX in caricamento, riprova tra qualche secondo.");
     return;
   }
   const wb = XLSX.utils.book_new();
+  const sheetData = [];
+
+  sheetData.utils = {};
+  sheetData.push([`PROGRAMMA ATTUALE — ${plan.title || "SCHEDA"} — ${new Date().toLocaleDateString("it-IT")}`]);
+  
+  const header = ["Gruppo Muscolare", "Esercizio"];
+  for (let w = 1; w <= plan.weeks; w++) {
+    header.push(`S${w}`);
+    header.push("kg");
+  }
+  sheetData.push(header);
 
   plan.days.forEach((day) => {
-    const sheetData = [];
-    sheetData.push(["SCHEDA DI ALLENAMENTO", plan.title || "Programma"]);
-    sheetData.push(["Giorno:", day.name]);
-    sheetData.push([]);
-
-    const header = ["Gruppo", "Esercizio", "Rest"];
-    for (let w = 1; w <= plan.weeks; w++) {
-      header.push(`S${w} Schema`);
-      header.push(`S${w} Kg`);
-    }
-    sheetData.push(header);
-
+    sheetData.push([day.name.toUpperCase(), "", ...Array(plan.weeks * 2).fill("")]);
     day.rows.forEach((r) => {
-      const row = [r.group || "", r.ex || "", r.rest || ""];
+      const row = [r.group || "", r.ex || ""];
       for (let w = 0; w < plan.weeks; w++) {
         row.push(r.scheme[w] || "");
         const ser = seriesOf(r.scheme[w]);
         if (ser) {
-          const kgs = ser.map((_, si) => plan.kg[kgKey(r.id, w, si)] || "-").join("/");
+          const kgs = ser.map((_, si) => plan.kg[kgKey(r.id, w, si)] || "").filter(Boolean).join("/");
           row.push(kgs);
         } else {
           row.push(plan.kg[kgKey(r.id, w, 0)] || "");
@@ -334,15 +333,25 @@ function exportToExcel() {
       }
       sheetData.push(row);
     });
-
-    const ws = XLSX.utils.aoa_to_sheet(sheetData);
-    const safeSheetName = (day.name || "Giorno").replace(/[:\\/?*\[\]]/g, " ").slice(0, 30);
-    XLSX.utils.book_append_sheet(wb, ws, safeSheetName);
   });
 
-  const fileName = `${(plan.title || "Scheda").replace(/\s+/g, "_")}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+  XLSX.utils.book_append_sheet(wb, ws, "Programma Attuale");
+
+  // Aggiungiamo anche il foglio Libreria Esercizi per completezza strutturale
+  const libHeaders = GROUPS;
+  const libRows = [libHeaders];
+  const maxLen = Math.max(...GROUPS.map(g => (plan.library[g] || []).length), 1);
+  for (let i = 0; i < maxLen; i++) {
+    const row = GROUPS.map(g => (plan.library[g] || [])[i] || "");
+    libRows.push(row);
+  }
+  const wsLib = XLSX.utils.aoa_to_sheet(libRows);
+  XLSX.utils.book_append_sheet(wb, wsLib, "Libreria Esercizi");
+
+  const fileName = `Scheda_Modulare_${new Date().toISOString().slice(0, 10)}.xlsx`;
   XLSX.writeFile(wb, fileName);
-  toast("Esportazione Excel completata!");
+  toast("File Excel esportato con successo!");
 }
 
 /* ---------- azioni ---------- */
@@ -364,7 +373,15 @@ function listenToUid(uid) {
   showMsg("<p>Caricamento...</p>");
   unsub = onSnapshot(ref, (snap) => {
     if (!snap.exists()) {
-      if (snap.metadata.fromCache) showMsg("<p>Connessione in corso...</p>"); else showOnboarding();
+      if (snap.metadata.fromCache) {
+        showMsg("<p>Connessione in corso...</p>");
+      } else {
+        if (activeUid === user?.uid) {
+          showOnboarding();
+        } else {
+          showMsg(`<h1>Utente non trovato</h1><p>Nessuna scheda trovata per l'utente: ${esc(activeUid)}</p><button class="btn" data-a="admin-reset">Torna indietro</button>`);
+        }
+      }
       return;
     }
     if (rendered) {
@@ -377,7 +394,7 @@ function listenToUid(uid) {
   }, (err) => {
     showMsg(`<h1>Accesso negato</h1><p>${err.code === "permission-denied"
       ? "Impossibile accedere alla scheda richiesta."
-      : esc(err.message)}</p><button class="btn" data-a="logout">Esci</button>`);
+      : esc(err.message)}</p><button class="btn" data-a="admin-reset">Torna alla Mia Scheda</button>`);
   });
 }
 
@@ -393,7 +410,7 @@ async function handleAction(a, t) {
     case "logout": await signOut(auth); return;
     case "admin-load": {
       const target = ($("#adminTargetUid")?.value || "").trim();
-      if (!target) return toast("Inserisci un UID valido.");
+      if (!target) return toast("Inserisci un UID o Email valido.");
       listenToUid(target);
       return;
     }
