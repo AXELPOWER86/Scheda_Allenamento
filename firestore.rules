@@ -2,18 +2,26 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-   function autorizzato() {
-      return request.auth != null
+    // Lista delle email autorizzate ad accedere al sito.
+    // Aggiungi o rimuovi le email qui dentro per gestire gli accessi.
+    function isEmailAutorizzata() {
+      return request.auth != null 
         && request.auth.token.email_verified == true
         && request.auth.token.email in [
           'kataxsecret@gmail.com',
-          'andyplay95@gmail.com'
+          'cliente1@gmail.com',
+          'cliente2@gmail.com'
         ];
     }
 
-    // Ognuno legge e scrive solo sotto il proprio uid.
+    function isAdmin() {
+      return request.auth != null && request.auth.token.email == 'kataxsecret@gmail.com';
+    }
+
     match /users/{uid}/{document=**} {
-      allow read, write: if autorizzato() && request.auth.uid == uid;
+      // Un utente autorizzato legge e scrive solo sulla propria scheda (uid == request.auth.uid).
+      // L'admin può leggere e scrivere sulla scheda di qualunque utente della lista.
+      allow read, write: if isEmailAutorizzata() && (request.auth.uid == uid || isAdmin());
     }
   }
 }
