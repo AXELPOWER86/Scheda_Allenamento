@@ -34,6 +34,46 @@ let user = null, ref = null, unsub = null, plan = null, rendered = false;
 const ui = { tab: "scheda", day: 0, week: 0, edit: false };
 const timers = new Map();
 
+/* ---------- serie e carichi ---------- */
+// "8/6/5" -> una casella kg per serie (con le ripetizioni come etichetta); "3x10" o testo libero -> una sola casella.
+function seriesOf(scheme) {
+  const p = String(scheme ?? "").split("/").map((x) => x.trim()).filter(Boolean);
+  return p.length > 1 ? p : null;
+}
+// La serie 1 usa la chiave storica "<riga>_<sett>" (i kg gia' salvati restano validi), le altre "<riga>_<sett>_<n>".
+const kgKey = (id, w, s) => (s ? `${id}_${w}_${s}` : `${id}_${w}`);
+
+/* ---------- annulla / ripeti (modifica scheda) ---------- */
+const hist = { undo: [], redo: [], typing: null };
+const snapStruct = () => clone({ days: plan.days, library: plan.library, weeks: plan.weeks, title: plan.title });
+function pushUndo() { // da chiamare PRIMA di ogni modifica alla struttura
+  hist.undo.push({ s: snapStruct(), kgLost: {} });
+  if (hist.undo.length > 50) hist.undo.shift();
+  hist.redo = []; hist.typing = null;
+}
+function typing(key) { // una sola voce di annulla per ogni campo di testo che stai scrivendo
+  if (hist.typing !== key) { pushUndo(); hist.typing = key; }
+}
+function restoreStruct(s) {
+  Object.assign(plan, clone(s)); normalize(plan); saveStruct();
+}
+function undo() {
+  const e = hist.undo.pop(); if (!e) return;
+  hist.redo.push({ s: snapStruct(), kgLost: e.kgLost });
+  restoreStruct(e.s);
+  for (const [k, v] of Object.entries(e.kgLost)) // rimette i kg cancellati da quell'azione (eliminazione riga/giorno, cambio esercizio)
+    if (!(k in plan.kg)) { plan.kg[k] = v; save({ ["kg." + k]: v }); }
+  hist.typing = null; render();
+}
+function redo() {
+  const e = hist.redo.pop(); if (!e) return;
+  hist.undo.push({ s: snapStruct(), kgLost: e.kgLost });
+  restoreStruct(e.s);
+  for (const k of Object.keys(e.kgLost))
+    if (k in plan.kg) { delete plan.kg[k]; save({ ["kg." + k]: deleteField() }); }
+  hist.typing = null; render();
+}
+
 /* ---------- salvataggio ---------- */
 function toast(msg) {
   const t = document.createElement("div");
@@ -78,10 +118,11 @@ function findRow(id) {
   return null;
 }
 const inLib = (g, ex) => (plan.library[g] || []).some((x) => x.toLowerCase() === ex.toLowerCase());
-const groupsList = () => [...new Set([...GROUPS, ...Object.keys(plan.library)])];
 const hasKg = (id) => Object.keys(plan.kg).some((k) => k.startsWith(id + "_"));
 function clearRowKg(id) {
+  const lost = hist.undo.at(-1)?.kgLost;
   Object.keys(plan.kg).filter((k) => k.startsWith(id + "_")).forEach((k) => {
+    if (lost) lost[k] = plan.kg[k];
     delete plan.kg[k]; save({ ["kg." + k]: deleteField() });
   });
 }
@@ -132,8 +173,10 @@ function viewScheda() {
     `<button class="chip ${w === ui.week ? "on" : ""}" data-a="week" data-i="${w}">S${w + 1}</button>`).join("");
   let h = `<div class="chips">${dayChips}${ui.edit ? `<button class="chip" data-a="add-day">+ giorno</button>` : ""}</div>
     <div class="chips">${weekChips}</div>
-    <div class="bar"><span class="sm">${d ? d.rows.length : 0} esercizi</span>
-    <button class="chip ${ui.edit ? "on" : ""}" data-a="edit">${ui.edit ? "Fine modifica" : "Modifica scheda"}</button></div>`;
+    <div class="bar ${ui.edit ? "sticky" : ""}"><span class="sm">${d ? d.rows.length : 0} esercizi</span>
+    <span class="grp">${ui.edit ? `<button class="chip ic" data-a="undo" aria-label="Annulla" ${hist.undo.length ? "" : "disabled"}>&#8630; Annulla</button>
+    <button class="chip ic" data-a="redo" aria-label="Ripeti" ${hist.redo.length ? "" : "disabled"}>&#8631;</button>` : ""}
+    <button class="chip ${ui.edit ? "on" : ""}" data-a="edit">${ui.edit ? "Fine modifica" : "Modifica scheda"}</button></span></div>`;
   if (!d) return h + `<p class="note">Nessun giorno: premi "Modifica scheda" e aggiungi un giorno.</p>`;
   if (ui.edit) {
     h += `<div class="card"><div class="erow"><label style="flex:1">Titolo scheda
@@ -150,14 +193,28 @@ function viewScheda() {
   return h + (body || `<p class="note">Giorno vuoto.</p>`);
 }
 function cardView(r, w) {
-  const key = `${r.id}_${w}`, cur = plan.kg[key] ?? "", prev = w > 0 ? (plan.kg[`${r.id}_${w - 1}`] ?? "") : "";
-  return `<div class="card"><div class="top"><span class="badge">${esc(r.group)}</span>
+  const ser = seriesOf(r.scheme[w]), n = ser ? ser.length : 1;
+  const box = (si) => {
+    const key = kgKey(r.id, w, si), cur = plan.kg[key] ?? "", prev = w > 0 ? (plan.kg[kgKey(r.id, w - 1, si)] ?? "") : "";
+    return { key, cur, prev };
+  };
+  const head = `<div class="card"><div class="top"><span class="badge">${esc(r.group)}</span>
     <span>&#9201; ${esc(r.rest || "-")}</span></div>
-    <div class="ex">${esc(r.ex || "- scegli esercizio -")}</div>
-    <div class="line"><div class="scheme">${esc(r.scheme[w] || "-")}</div>
+    <div class="ex">${esc(r.ex || "- scegli esercizio -")}</div>`;
+  if (!ser) {
+    const { key, cur, prev } = box(0);
+    return head + `<div class="line"><div class="scheme">${esc(r.scheme[w] || "-")}</div>
     <label class="kg"><input type="text" inputmode="decimal" data-kg="${key}" value="${esc(cur)}"
       placeholder="${esc(prev)}" aria-label="kg"><span>kg</span></label></div>
     ${prev ? `<div class="hint">sett. prec.: ${esc(prev)} kg</div>` : ""}</div>`;
+  }
+  const boxes = Array.from({ length: n }, (_, si) => box(si));
+  const prevs = boxes.map((b) => b.prev);
+  return head + `<div class="line"><div class="scheme">${esc(r.scheme[w])}</div><span class="note">kg per serie</span></div>
+    <div class="series">${boxes.map((b, si) => `<label class="sk"><span>${esc(ser[si])} rip</span>
+      <input type="text" inputmode="decimal" data-kg="${b.key}" value="${esc(b.cur)}"
+        placeholder="${esc(b.prev)}" aria-label="kg serie ${si + 1} (${esc(ser[si])} rip)"></label>`).join("")}</div>
+    ${prevs.some(Boolean) ? `<div class="hint">sett. prec.: ${prevs.map((x) => esc(x || "-")).join(" / ")} kg</div>` : ""}</div>`;
 }
 function exOptions(r) {
   const list = [...(plan.library[r.group] || [])];
@@ -168,7 +225,7 @@ function exOptions(r) {
 }
 function cardEdit(r, i, n) {
   return `<div class="card" data-row="${r.id}">
-    <div class="erow"><select data-f="group">${groupsList().map((g) =>
+    <div class="erow"><select data-f="group">${GROUPS.map((g) =>
       `<option ${g === r.group ? "selected" : ""}>${g}</option>`).join("")}</select>
       <select data-f="ex">${exOptions(r)}</select></div>
     <div class="schemes">${Array.from({ length: plan.weeks }, (_, w) =>
@@ -207,91 +264,16 @@ function updateCalc() {
 /* --- impostazioni --- */
 function viewOpz() {
   return `<div class="sec">Libreria esercizi</div>
-    ${groupsList().map((g) => `<details><summary>${g} (${(plan.library[g] || []).length})</summary>
+    ${GROUPS.map((g) => `<details><summary>${g} (${(plan.library[g] || []).length})</summary>
       <div class="tags">${(plan.library[g] || []).map((x, i) =>
         `<span class="tag">${esc(x)}<button data-a="lib-del" data-g="${g}" data-i="${i}">&times;</button></span>`).join("")}</div>
       <div class="erow"><input type="text" data-newex="${g}" placeholder="Nuovo esercizio" style="flex:1">
       <button class="btn" data-a="lib-add" data-g="${g}">Aggiungi</button></div></details>`).join("")}
     <div class="sec">Dati</div>
     <div class="erow"><button class="btn ghost" data-a="export">Esporta backup (JSON)</button>
-    <button class="btn ghost" data-a="import">Importa scheda (Excel o backup)</button></div>
+    <button class="btn ghost" data-a="import">Importa backup</button></div>
     <div class="erow"><button class="btn danger" data-a="clear-kg">Azzera tutti i kg (nuovo blocco)</button></div>
     <p class="note">Consiglio: esporta il backup prima di azzerare i kg o di cambiare scheda.</p>`;
-}
-
-
-/* ---------- import da Excel ---------- */
-function loadXlsx() {
-  if (window.XLSX) return Promise.resolve(window.XLSX);
-  return new Promise((res, rej) => {
-    const sc = document.createElement("script");
-    sc.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
-    sc.onload = () => res(window.XLSX);
-    sc.onerror = () => rej(new Error("impossibile caricare il lettore Excel (rete?)"));
-    document.head.appendChild(sc);
-  });
-}
-// rows = matrice di celle del foglio. Layout atteso: intestazioni "Gruppo Muscolare", "Esercizio", "S1".."Sn"
-// (con eventuale colonna "kg" subito dopo ogni Sn), "Rest"; righe "GIORNO n" come separatori.
-function rowsToPlan(rows, title) {
-  const cl = (v) => String(v ?? "").trim();
-  const hi = rows.findIndex((r) => r.some((c) => /^esercizio$/i.test(cl(c))) && r.some((c) => /^s\d+$/i.test(cl(c))));
-  if (hi < 0) throw new Error("non trovo l'intestazione: servono le colonne 'Esercizio' e 'S1', 'S2'...");
-  const H = rows[hi].map(cl);
-  const cEx = H.findIndex((h) => /^esercizio$/i.test(h));
-  const cGr = H.findIndex((h) => /^gruppo/i.test(h));
-  const cRest = H.findIndex((h) => /^(rest|recupero)/i.test(h));
-  if (cGr < 0) throw new Error("manca la colonna 'Gruppo Muscolare'");
-  const wk = [];
-  H.forEach((h, i) => { if (/^s\d+$/i.test(h)) wk.push({ c: i, kg: /^kg$/i.test(H[i + 1] || "") ? i + 1 : -1 }); });
-  const lib = clone(plan.library), days = [], kg = {};
-  let cur = null, nRows = 0, newEx = 0; const newGroups = new Set();
-  const canon = (g) => groupsList().concat(Object.keys(lib)).find((x) => x.toLowerCase() === g.toLowerCase())
-    || g.charAt(0).toUpperCase() + g.slice(1);
-  for (const r of rows.slice(hi + 1)) {
-    const a = cl(r[0]), g = cl(r[cGr]), ex = cl(r[cEx]);
-    if (/^giorno/i.test(a) || /^giorno/i.test(g)) {
-      cur = { name: (a || g).toLowerCase().replace(/^./, (c) => c.toUpperCase()), rows: [] }; days.push(cur); continue;
-    }
-    if (!g || !ex) continue;
-    if (!cur) { cur = { name: "Giorno 1", rows: [] }; days.push(cur); }
-    const group = canon(g), id = newId();
-    if (!lib[group]) { lib[group] = []; newGroups.add(group); }
-    if (!lib[group].some((x) => x.toLowerCase() === ex.toLowerCase())) { lib[group].push(ex); newEx++; }
-    wk.forEach((w, i) => { if (w.kg >= 0) { const v = cl(r[w.kg]).replace(/^(\d+)\.0$/, "$1"); if (v) kg[`${id}_${i}`] = v; } });
-    cur.rows.push({ id, group, ex, scheme: wk.map((w) => cl(r[w.c])), rest: cRest >= 0 ? cl(r[cRest]) : "" });
-    nRows++;
-  }
-  if (!nRows) throw new Error("nessun esercizio trovato sotto l'intestazione");
-  return { title, weeks: wk.length, days, library: lib, kg, nRows, newEx, newGroups: [...newGroups] };
-}
-async function applyImport(p) {
-  plan = normalize({ ...clone(plan), ...clone(p) }); ui.day = 0; ui.week = 0; ui.edit = false; render();
-  const { nRows, newEx, newGroups, ...data } = p;
-  await setDoc(ref, clone({ ...plan, ...data }));
-}
-async function importFile(file) {
-  const ext = file.name.split(".").pop().toLowerCase();
-  const baseTitle = file.name.replace(/\.[^.]+$/, "").replace(/_/g, " ");
-  if (ext === "json") {
-    const data = JSON.parse(await file.text());
-    if (!Array.isArray(data.days)) throw new Error("file non valido (manca 'days')");
-    if (!confirm("Sostituire la scheda attuale con quella del file?")) return;
-    plan = normalize({ ...data, createdAt: Date.now() }); ui.day = 0; ui.week = 0; render();
-    await setDoc(ref, clone(plan)); return;
-  }
-  if (!["xlsx", "xlsm", "xls"].includes(ext)) throw new Error("formato non supportato (usa .xlsx, .xlsm o .json)");
-  const X = await loadXlsx();
-  const wb = X.read(await file.arrayBuffer(), { type: "array" });
-  const sheet = wb.SheetNames.find((n) => /programma/i.test(n)) || wb.SheetNames[0];
-  const rows = X.utils.sheet_to_json(wb.Sheets[sheet], { header: 1, defval: "", raw: false });
-  const p = rowsToPlan(rows, baseTitle);
-  const nKg = Object.keys(p.kg).length;
-  if (!confirm(`Importare "${p.title}" dal foglio "${sheet}"?\n${p.days.length} giorni, ${p.nRows} esercizi, ${p.weeks} settimane` +
-      `${nKg ? `, ${nKg} kg` : ""}.\nSostituisce la scheda e i kg attuali (esporta prima un backup se ti servono).`)) return;
-  await applyImport(p);
-  toast(`Importati ${p.nRows} esercizi` + (p.newEx ? `, ${p.newEx} nuovi aggiunti alla libreria` : "") +
-        (p.newGroups.length ? `, nuovi gruppi: ${p.newGroups.join(", ")}` : ""));
 }
 
 /* ---------- azioni ---------- */
@@ -321,28 +303,31 @@ async function handleAction(a, t) {
     case "day": ui.day = +t.dataset.i; break;
     case "week": ui.week = +t.dataset.i; break;
     case "edit": ui.edit = !ui.edit; break;
-    case "add-day": plan.days.push({ name: `Giorno ${plan.days.length + 1}`, rows: [] });
+    case "undo": undo(); return;
+    case "redo": redo(); return;
+    case "add-day": pushUndo(); plan.days.push({ name: `Giorno ${plan.days.length + 1}`, rows: [] });
       ui.day = plan.days.length - 1; saveStruct(); break;
     case "del-day":
       if (!d || !confirm(`Eliminare "${d.name}" e i kg dei suoi esercizi?`)) return;
-      d.rows.forEach((r) => clearRowKg(r.id)); plan.days.splice(ui.day, 1); saveStruct(); break;
-    case "add-row": d.rows.push({ id: newId(), group: d.rows.at(-1)?.group || "Petto", ex: "",
+      pushUndo(); d.rows.forEach((r) => clearRowKg(r.id)); plan.days.splice(ui.day, 1); saveStruct(); break;
+    case "add-row": pushUndo(); d.rows.push({ id: newId(), group: d.rows.at(-1)?.group || "Petto", ex: "",
       scheme: Array(plan.weeks).fill(""), rest: "" }); saveStruct(); break;
     case "del-row": if (!confirm("Eliminare questo esercizio e i suoi kg?")) return;
-      { const f = findRow(t.dataset.id); if (f) { clearRowKg(f.r.id); f.d.rows.splice(f.i, 1); } }
+      pushUndo(); { const f = findRow(t.dataset.id); if (f) { clearRowKg(f.r.id); f.d.rows.splice(f.i, 1); } }
       saveStruct(); break;
-    case "up": move(t.dataset.id, -1); saveStruct(); break;
-    case "down": move(t.dataset.id, 1); saveStruct(); break;
-    case "weeks+": plan.weeks++; plan.days.forEach((x) => x.rows.forEach((r) => r.scheme.push(""))); saveStruct(); break;
+    case "up": pushUndo(); move(t.dataset.id, -1); saveStruct(); break;
+    case "down": pushUndo(); move(t.dataset.id, 1); saveStruct(); break;
+    case "weeks+": pushUndo(); plan.weeks++; plan.days.forEach((x) => x.rows.forEach((r) => r.scheme.push(""))); saveStruct(); break;
     case "weeks-":
       if (plan.weeks <= 1 || !confirm(`Rimuovere la settimana S${plan.weeks}? I kg gia' segnati restano salvati ma non visibili.`)) return;
-      plan.weeks--; saveStruct(); break;
+      pushUndo(); plan.weeks--; saveStruct(); break;
     case "lib-add": {
       const g = t.dataset.g, inp = view.querySelector(`[data-newex="${g}"]`), v = inp.value.trim();
       if (!v) return;
-      plan.library[g] ??= []; if (!inLib(g, v)) plan.library[g].push(v); saveStruct(); break;
+      if (inLib(g, v)) return;
+      pushUndo(); (plan.library[g] ??= []).push(v); saveStruct(); break;
     }
-    case "lib-del": plan.library[t.dataset.g].splice(+t.dataset.i, 1); saveStruct(); break;
+    case "lib-del": pushUndo(); plan.library[t.dataset.g].splice(+t.dataset.i, 1); saveStruct(); break;
     case "export": download(`scheda-${new Date().toISOString().slice(0, 10)}.json`,
       JSON.stringify(clone({ title: plan.title, weeks: plan.weeks, days: plan.days,
         library: plan.library, rm: plan.rm, kg: plan.kg }), null, 1)); return;
@@ -364,17 +349,17 @@ function onInput(e) {
     updateCalc(); return;
   }
   const card = el.closest("[data-row]"), f = ds.f;
-  if (f === "title") { plan.title = el.value; saveStruct(); return; }
-  if (f === "dayname") { plan.days[ui.day].name = el.value; saveStruct(); return; }
+  if (f === "title") { typing("title"); plan.title = el.value; saveStruct(); return; }
+  if (f === "dayname") { typing("dayname" + ui.day); plan.days[ui.day].name = el.value; saveStruct(); return; }
   const row = card && findRow(card.dataset.row)?.r; if (!row) return;
-  if (f === "scheme") { row.scheme[+ds.w] = el.value; saveStruct(); }
-  if (f === "rest") { row.rest = el.value; saveStruct(); }
+  if (f === "scheme") { typing("s" + row.id + ds.w); row.scheme[+ds.w] = el.value; saveStruct(); }
+  if (f === "rest") { typing("r" + row.id); row.rest = el.value; saveStruct(); }
 }
 function onChange(e) {
   const el = e.target, f = el.dataset.f, card = el.closest("[data-row]");
   const row = card && findRow(card.dataset.row)?.r; if (!row) return;
   if (f === "group") {
-    row.group = el.value;
+    pushUndo(); row.group = el.value;
     if (row.ex && !inLib(row.group, row.ex)) setExercise(row, "");
     saveStruct(); render();
   } else if (f === "ex") {
@@ -383,23 +368,34 @@ function onChange(e) {
       v = (prompt(`Nome del nuovo esercizio (${row.group}):`) || "").trim();
       if (!v) { render(); return; }
       const existing = (plan.library[row.group] || []).find((x) => x.toLowerCase() === v.toLowerCase());
+      pushUndo();
       if (existing) v = existing; else (plan.library[row.group] ??= []).push(v);
-    }
+    } else pushUndo();
     setExercise(row, v); saveStruct(); render();
   }
 }
 document.addEventListener("click", (e) => { const t = e.target.closest("[data-a]"); if (t) handleAction(t.dataset.a, t); });
 view.addEventListener("input", onInput);
 view.addEventListener("change", onChange);
+view.addEventListener("focusout", () => { hist.typing = null; });
 $("#importFile").addEventListener("change", async (e) => {
   const file = e.target.files[0]; e.target.value = ""; if (!file) return;
-  try { await importFile(file); } catch (err) { toast("Importazione non riuscita: " + err.message); }
+  try {
+    const data = JSON.parse(await file.text());
+    if (!Array.isArray(data.days)) throw new Error("file non valido (manca 'days')");
+    if (!confirm("Sostituire la scheda attuale con quella del file?")) return;
+    const p = normalize({ ...data, createdAt: Date.now() });
+    await setDoc(ref, clone(p));
+    hist.undo = []; hist.redo = []; hist.typing = null;
+    ui.day = 0; ui.week = 0;
+  } catch (err) { toast("Importazione non riuscita: " + err.message); }
 });
 
 /* ---------- autenticazione e sync ---------- */
 onAuthStateChanged(auth, (u) => {
   if (unsub) { unsub(); unsub = null; }
   user = u; plan = null; rendered = false;
+  hist.undo = []; hist.redo = []; hist.typing = null;
   if (!u) { showLogin(); return; }
   ref = doc(db, "users", u.uid, "plan", "main");
   showMsg("<p>Caricamento...</p>");
