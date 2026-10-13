@@ -2,7 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-         doc, onSnapshot, setDoc, updateDoc, deleteField }
+         doc, getDoc, setDoc, updateDoc, deleteField, onSnapshot }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 import { SEED_DAYS, SEED_LIBRARY } from "./seed.js";
@@ -32,6 +32,7 @@ const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
 });
 let user = null, activeUid = null, ref = null, unsub = null, plan = null, rendered = false;
+let aliasesCache = {};
 const ui = { tab: "scheda", day: 0, week: 0, edit: false };
 const timers = new Map();
 
@@ -160,14 +161,18 @@ function renderHeader() {
 function renderAdminSection() {
   if (user?.email !== ADMIN_EMAIL) return "";
   const isViewingOther = activeUid && activeUid !== user?.uid;
+  const currentAlias = Object.keys(aliasesCache).find(k => aliasesCache[k] === activeUid) || "";
   return `<div class="admin-card">
     <h3>Pannello Amministrazione Clienti</h3>
     <div class="erow">
-      <input type="text" id="adminTargetUid" placeholder="Inserisci Email / UID / Nome Utente" value="${isViewingOther ? esc(activeUid) : ""}" style="flex:1">
+      <input type="text" id="adminTargetUid" placeholder="Inserisci UID o Alias" value="${isViewingOther ? esc(currentAlias || activeUid) : ""}" style="flex:1">
       <button class="btn" data-a="admin-load">Carica Utente</button>
       ${isViewingOther ? `<button class="btn ghost" data-a="admin-reset">Torna alla Mia Scheda</button>` : ""}
     </div>
-    ${isViewingOther ? `<p class="note" style="color:var(--pri)">Gestione attiva della scheda utente: <b>${esc(activeUid)}</b></p>` : ""}
+    ${isViewingOther ? `<div class="erow" style="margin-top:8px;justify-content:space-between;align-items:center">
+      <span class="note" style="color:var(--pri)">UID attivo: <b>${esc(activeUid)}</b> ${currentAlias ? `(Alias: <b>${esc(currentAlias)}</b>)` : ""}</span>
+      <button class="btn ghost" data-a="set-alias" style="padding:4px 8px;font-size:12px">${currentAlias ? "Modifica Alias" : "+ Assegna Alias"}</button>
+    </div>` : ""}
   </div>`;
 }
 
@@ -309,7 +314,6 @@ function exportToExcel() {
   if (typeof XLSX === "undefined") return toast("Libreria XLSX in caricamento...");
   const wb = XLSX.utils.book_new();
 
-  // 1. Foglio: Programma Attuale
   const sheetData = [];
   sheetData.push([`PROGRAMMA ATTUALE — ${plan.title || "SCHEDA"} — ${new Date().toLocaleDateString("it-IT")}`]);
   
@@ -341,7 +345,6 @@ function exportToExcel() {
   const ws = XLSX.utils.aoa_to_sheet(sheetData);
   XLSX.utils.book_append_sheet(wb, ws, "Programma Attuale");
 
-  // 2. Foglio: Calcolatore %1RM
   const calcData = [];
   calcData.push(["CALCOLATORE MASSIMALI (1RM)"]);
   calcData.push(["Peso corporeo (kg)", plan.rm.bw || ""]);
@@ -368,7 +371,6 @@ function exportToExcel() {
   const wsCalc = XLSX.utils.aoa_to_sheet(calcData);
   XLSX.utils.book_append_sheet(wb, wsCalc, "Calcolatore %1RM");
 
-  // 3. Foglio: Libreria Esercizi
   const libHeaders = GROUPS;
   const libRows = [libHeaders];
   const maxLen = Math.max(...GROUPS.map(g => (plan.library[g] || []).length), 1);
@@ -381,7 +383,7 @@ function exportToExcel() {
 
   const fileName = `Scheda_Modulare_${new Date().toISOString().slice(0, 10)}.xlsx`;
   XLSX.writeFile(wb, fileName);
-  toast("File Excel esportato con successo (incluso Calcolatore)!");
+  toast("File Excel esportato con successo!");
 }
 
 async function parseAndImportExcel(file) {
@@ -479,7 +481,6 @@ async function parseAndImportExcel(file) {
       }
     }
 
-    // Importazione Calcolatore se presente nel foglio Excel
     const importedRm = { bw: "", lifts: {} };
     const calcSheet = workbook.Sheets['Calcolatore %1RM'] || workbook.Sheets['Calcolatore'];
     if (calcSheet) {
@@ -534,15 +535,28 @@ function download(name, text) {
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-function listenToUid(targetId) {
+async function loadAliases() {
+  try {
+    const snap = await getDoc(doc(db, "admin", "aliases"));
+    aliasesCache = snap.exists() ? snap.data() : {};
+  } catch (e) {
+    console.error("Error loading aliases:", e);
+    aliasesCache = {};
+  }
+}
+
+async function listenToUid(targetInput) {
   if (unsub) { unsub(); unsub = null; }
   
-  const isEmailOrAlias = targetId.includes("@") || !targetId.match(/^[a-zA-Z0-9]{20,}$/);
-  const safePathId = isEmailOrAlias 
-    ? targetId.trim().toLowerCase().replace(/[@.]/g, "_") 
-    : targetId.trim();
-    
-  activeUid = safePathId;
+  await loadAliases();
+  
+  const cleanTarget = targetInput.trim();
+  const lowerAlias = cleanTarget.toLowerCase();
+  
+  // Risoluzione alias se presente, altrimenti usa direttamente il target (es. UID)
+  const targetUid = aliasesCache[lowerAlias] || aliasesCache[cleanTarget] || cleanTarget;
+  
+  activeUid = targetUid;
   rendered = false;
   
   ref = doc(db, "users", activeUid, "plan", "main");
@@ -582,15 +596,30 @@ async function handleAction(a, t) {
     case "logout": await signOut(auth); return;
     case "admin-load": {
       const target = ($("#adminTargetUid")?.value || "").trim();
-      if (!target) return toast("Inserisci un Email / UID / Nome Utente valido.");
-      
+      if (!target) return toast("Inserisci un UID o un Alias valido.");
       listenToUid(target);
       return;
     }
     case "admin-reset":
-      
       if (user) listenToUid(user.uid);
       return;
+    case "set-alias": {
+      if (!activeUid || activeUid === user?.uid) return toast("Seleziona prima la scheda di un cliente.");
+      const currentAlias = Object.keys(aliasesCache).find(k => aliasesCache[k] === activeUid) || "";
+      const newAlias = (prompt("Inserisci un alias/nome semplice per questo utente (es. alessandro):", currentAlias) || "").trim();
+      if (!newAlias) return;
+      
+      const lowerNew = newAlias.toLowerCase();
+      aliasesCache[lowerNew] = activeUid;
+      try {
+        await setDoc(doc(db, "admin", "aliases"), aliasesCache, { merge: true });
+        toast(`Alias "${newAlias}" associato con successo all'utente!`);
+        render();
+      } catch (err) {
+        onErr(err);
+      }
+      return;
+    }
     case "seed": case "empty":
       try {
         const newPlan = buildPlan(a === "seed");
@@ -696,15 +725,16 @@ $("#importFile").addEventListener("change", async (e) => {
 });
 
 $("#importExcelFile").addEventListener("change", async (e) => {
-  const file = e.target.files[0]; e.target.value = ""; if (!file) return;
+  const file = e.target.files[0]; e.target.value = ""; if not file return;
   if (!confirm(`Importare la scheda, i carichi ed il Calcolatore dal file Excel "${file.name}" per l'utente attivo?`)) return;
   await parseAndImportExcel(file);
 });
 
 /* ---------- autenticazione e sync ---------- */
-onAuthStateChanged(auth, (u) => {
+onAuthStateChanged(auth, async (u) => {
   user = u; plan = null; rendered = false;
   hist.undo = []; hist.redo = []; hist.typing = null;
   if (!u) { if (unsub) unsub(); showLogin(); return; }
+  await loadAliases();
   listenToUid(u.uid);
 });
