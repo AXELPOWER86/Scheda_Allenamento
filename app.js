@@ -583,12 +583,12 @@ async function handleAction(a, t) {
     case "admin-load": {
       const target = ($("#adminTargetUid")?.value || "").trim();
       if (!target) return toast("Inserisci un Email / UID / Nome Utente valido.");
-      if (document.activeElement) document.activeElement.blur();
+      
       listenToUid(target);
       return;
     }
     case "admin-reset":
-      if (document.activeElement) document.activeElement.blur();
+      
       if (user) listenToUid(user.uid);
       return;
     case "seed": case "empty":
