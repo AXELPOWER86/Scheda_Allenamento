@@ -163,7 +163,7 @@ function renderAdminSection() {
   return `<div class="admin-card">
     <h3>Pannello Amministrazione Clienti</h3>
     <div class="erow">
-      <input type="text" id="adminTargetUid" placeholder="Inserisci Email / UID Utente" value="${isViewingOther ? esc(activeUid) : ""}" style="flex:1">
+      <input type="text" id="adminTargetUid" placeholder="Inserisci Email / UID / Nome Utente" value="${isViewingOther ? esc(activeUid) : ""}" style="flex:1">
       <button class="btn" data-a="admin-load">Carica Utente</button>
       ${isViewingOther ? `<button class="btn ghost" data-a="admin-reset">Torna alla Mia Scheda</button>` : ""}
     </div>
@@ -241,7 +241,7 @@ function exOptions(r) {
   const list = [...(plan.library[r.group] || [])];
   if (r.ex && !inLib(r.group, r.ex)) list.unshift(r.ex);
   return `<option value="">- scegli -</option>` +
-    list.map((x) => `<option ${x === r.ex ? "selected" : ""}>${esc(x)}</option>`) +
+    list.map((x) => `<option ${x === r.ex ? "selected" : ""}>${esc(x)}</option>`).join("") +
     `<option value="__new">+ Nuovo esercizio...</option>`;
 }
 
@@ -374,6 +374,7 @@ async function parseAndImportExcel(file) {
     }
 
     const importedDays = [];
+    const importedKg = {};
     let currentDay = null;
     let weeksCount = 5;
 
@@ -393,16 +394,34 @@ async function parseAndImportExcel(file) {
         const group = firstCol || "Petto";
         const ex = String(row[1] || "").trim();
         const scheme = [];
+        const rowId = newId();
 
+        let wIndex = 0;
         for (let c = 2; c < row.length; c += 2) {
-          scheme.push(String(row[c] || "").trim());
+          const schVal = String(row[c] ?? "").trim();
+          const kgVal = String(row[c + 1] ?? "").trim();
+          
+          scheme.push(schVal);
+
+          if (kgVal) {
+            const ser = seriesOf(schVal);
+            if (ser && kgVal.includes("/")) {
+              const kgParts = kgVal.split("/").map(x => x.trim());
+              kgParts.forEach((kv, si) => {
+                if (kv) importedKg[kgKey(rowId, wIndex, si)] = kv;
+              });
+            } else {
+              importedKg[kgKey(rowId, wIndex, 0)] = kgVal;
+            }
+          }
+          wIndex++;
         }
 
         while (scheme.length < weeksCount) scheme.push("");
         if (scheme.length > weeksCount) weeksCount = scheme.length;
 
         currentDay.rows.push({
-          id: newId(),
+          id: rowId,
           group: GROUPS.includes(group) ? group : "Petto",
           ex: ex,
           scheme: scheme,
@@ -437,7 +456,7 @@ async function parseAndImportExcel(file) {
       days: importedDays,
       library: importedLibrary,
       rm: { bw: "", lifts: {} },
-      kg: {},
+      kg: importedKg,
       createdAt: Date.now()
     });
 
@@ -446,7 +465,7 @@ async function parseAndImportExcel(file) {
     hist.undo = []; hist.redo = []; hist.typing = null;
     ui.day = 0; ui.week = 0;
     render();
-    toast("Scheda Excel importata ed applicata con successo!");
+    toast("Scheda e carichi Excel importati con successo!");
   } catch (err) {
     console.error(err);
     toast("Errore durante l'importazione dell'Excel: " + err.message);
@@ -465,14 +484,10 @@ function download(name, text) {
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-/* ---------- ascolto e gestione utente con supporto Alias ---------- */
 function listenToUid(targetId) {
   if (unsub) { unsub(); unsub = null; }
   
-  // Se viene inserito un alias semplice (es. "alessandro"), una mail o un UID
   const isEmailOrAlias = targetId.includes("@") || !targetId.match(/^[a-zA-Z0-9]{20,}$/);
-  
-  // Normalizza l'alias o la mail per Firestore
   const safePathId = isEmailOrAlias 
     ? targetId.trim().toLowerCase().replace(/[@.]/g, "_") 
     : targetId.trim();
@@ -517,7 +532,7 @@ async function handleAction(a, t) {
     case "logout": await signOut(auth); return;
     case "admin-load": {
       const target = ($("#adminTargetUid")?.value || "").trim();
-      if (!target) return toast("Inserisci un Email o UID valido.");
+      if (!target) return toast("Inserisci un Email / UID / Nome Utente valido.");
       if (document.activeElement) document.activeElement.blur();
       listenToUid(target);
       return;
@@ -632,7 +647,7 @@ $("#importFile").addEventListener("change", async (e) => {
 
 $("#importExcelFile").addEventListener("change", async (e) => {
   const file = e.target.files[0]; e.target.value = ""; if (!file) return;
-  if (!confirm(`Importare la scheda dal file Excel "${file.name}" per l'utente attivo?`)) return;
+  if (!confirm(`Importare la scheda ed i carichi dal file Excel "${file.name}" per l'utente attivo?`)) return;
   await parseAndImportExcel(file);
 });
 
