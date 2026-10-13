@@ -456,7 +456,7 @@ async function parseAndImportExcel(file) {
         const scheme = Array(weeksCount).fill("");
         const rowId = newId();
 
-        let restVal = "1'30\\\"";
+        let restVal = "1'30\"";
         if (restColIdx !== -1 && row[restColIdx] !== undefined && row[restColIdx] !== "") {
           restVal = String(row[restColIdx]).trim();
         }
@@ -582,7 +582,6 @@ async function listenToUid(targetInput) {
   const cleanTarget = targetInput.trim();
   const lowerTarget = cleanTarget.toLowerCase();
   
-  // Risoluzione unificata: cerca per alias, email o usa direttamente l'UID
   const targetUid = aliasesCache[lowerTarget] || aliasesCache[cleanTarget] || cleanTarget;
   
   activeUid = targetUid;
@@ -770,6 +769,21 @@ onAuthStateChanged(auth, async (u) => {
   user = u; plan = null; rendered = false;
   hist.undo = []; hist.redo = []; hist.typing = null;
   if (!u) { if (unsub) unsub(); showLogin(); return; }
+  
   await loadAliases();
+  
+  // Associazione automatica dell'email al login dell'utente (se non è l'admin)
+  if (u.email && u.email !== ADMIN_EMAIL) {
+    const emailLower = u.email.toLowerCase();
+    if (aliasesCache[emailLower] !== u.uid) {
+      aliasesCache[emailLower] = u.uid;
+      try {
+        await setDoc(doc(db, "admin", "aliases"), aliasesCache, { merge: true });
+      } catch (e) {
+        console.error("Errore salvataggio automatico email-UID:", e);
+      }
+    }
+  }
+
   listenToUid(u.uid);
 });
