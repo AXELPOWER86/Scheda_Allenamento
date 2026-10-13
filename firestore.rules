@@ -3,13 +3,12 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // Lista delle email autorizzate ad accedere al sito.
-    // Aggiungi o rimuovi le email qui dentro per gestire gli accessi.
     function isEmailAutorizzata() {
       return request.auth != null 
         && request.auth.token.email_verified == true
         && request.auth.token.email in [
           'kataxsecret@gmail.com',
-          'cliente1@gmail.com',
+          'andyplay95@gmail.com',
           'cliente2@gmail.com'
         ];
     }
@@ -19,8 +18,6 @@ service cloud.firestore {
     }
 
     match /users/{uid}/{document=**} {
-      // Un utente autorizzato legge e scrive solo sulla propria scheda (uid == request.auth.uid).
-      // L'admin può leggere e scrivere sulla scheda di qualunque utente della lista.
       allow read, write: if isEmailAutorizzata() && (request.auth.uid == uid || isAdmin());
     }
   }

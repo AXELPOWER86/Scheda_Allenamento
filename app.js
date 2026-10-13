@@ -46,6 +46,7 @@ const kgKey = (id, w, s) => (s ? `${id}_${w}_${s}` : `${id}_${w}`);
 const hist = { undo: [], redo: [], typing: null };
 const snapStruct = () => clone({ days: plan.days, library: plan.library, weeks: plan.weeks, title: plan.title });
 function pushUndo() {
+  if (!plan) return;
   hist.undo.push({ s: snapStruct(), kgLost: {} });
   if (hist.undo.length > 50) hist.undo.shift();
   hist.redo = []; hist.typing = null;
@@ -140,16 +141,17 @@ function showLogin() {
     <button class="btn" data-a="login">Accedi con Google</button></div>`;
 }
 function showMsg(html) { nav.innerHTML = ""; renderHeader();
-  view.innerHTML = `<div class="center">${html}</div>`; }
+  view.innerHTML = (user?.email === ADMIN_EMAIL ? renderAdminSection() : "") + `<div class="center">${html}</div>`; }
+
 function showOnboarding() {
-  showMsg(`<h1>Benvenuto</h1><p>Da quale scheda vuoi partire?</p>
+  showMsg(`<h1>Imposta Scheda</h1><p>Scegli da quale scheda partire per l'utente selezionato:</p>
     <p><button class="btn" data-a="seed">Scheda base (4 giorni)</button></p>
     <p><button class="btn ghost" data-a="empty">Scheda vuota</button></p>
-    <p class="note">La libreria esercizi e' la stessa in entrambi i casi e potrai modificare tutto dopo.</p>`);
+    <p class="note">La libreria esercizi sara' inclusa e potrai modificare tutto liberamente.</p>`);
 }
+
 function renderHeader() {
   const isAdmin = user?.email === ADMIN_EMAIL;
-  const isViewingOther = activeUid && activeUid !== user?.uid;
   hdr.innerHTML = `<b>${esc(plan?.title || "Scheda allenamento")}</b>
     <div><span>${esc((user?.displayName || user?.email || "").split(" ")[0])}${isAdmin ? " (Admin)" : ""}</span>
     <button data-a="logout">Esci</button></div>`;
@@ -161,11 +163,11 @@ function renderAdminSection() {
   return `<div class="admin-card">
     <h3>Pannello Amministrazione Clienti</h3>
     <div class="erow">
-      <input type="text" id="adminTargetUid" placeholder="Inserisci UID / Email Utente" value="${isViewingOther ? esc(activeUid) : ""}" style="flex:1">
+      <input type="text" id="adminTargetUid" placeholder="Inserisci Email / UID Utente" value="${isViewingOther ? esc(activeUid) : ""}" style="flex:1">
       <button class="btn" data-a="admin-load">Carica Utente</button>
       ${isViewingOther ? `<button class="btn ghost" data-a="admin-reset">Torna alla Mia Scheda</button>` : ""}
     </div>
-    ${isViewingOther ? `<p class="note" style="color:var(--pri)"> Stai gestendo la scheda dell'utente: <b>${esc(activeUid)}</b></p>` : ""}
+    ${isViewingOther ? `<p class="note" style="color:var(--pri)">Gestione attiva della scheda utente: <b>${esc(activeUid)}</b></p>` : ""}
   </div>`;
 }
 
@@ -289,44 +291,43 @@ function viewOpz() {
         `<span class="tag">${esc(x)}<button data-a="lib-del" data-g="${g}" data-i="${i}">&times;</button></span>`).join("")}</div>
       <div class="erow"><input type="text" data-newex="${g}" placeholder="Nuovo esercizio" style="flex:1">
       <button class="btn" data-a="lib-add" data-g="${g}">Aggiungi</button></div></details>`).join("")}
-    <div class="sec">Dati ed Esportazione</div>
+    <div class="sec">Dati ed Esportazione / Importazione</div>
     <div class="erow">
       <button class="btn" data-a="export-excel">Esporta Excel (.xlsx)</button>
+      <button class="btn ghost" data-a="import-excel">Importa Excel (.xlsx / .xlsm)</button>
+    </div>
+    <div class="erow">
       <button class="btn ghost" data-a="export">Esporta backup (JSON)</button>
-      <button class="btn ghost" data-a="import">Importa backup</button>
+      <button class="btn ghost" data-a="import">Importa backup (JSON)</button>
     </div>
     <div class="erow"><button class="btn danger" data-a="clear-kg">Azzera tutti i kg (nuovo blocco)</button></div>
-    <p class="note">Consiglio: esporta la scheda prima di azzerare i kg o di cambiare mesociclo.</p>`;
+    <p class="note">Puoi caricare direttamente un file Excel (.xlsx o .xlsm) per impostare la scheda dell'utente.</p>`;
 }
 
-/* ---------- esportazione excel ---------- */
+/* ---------- esportazione / importazione excel ---------- */
 function exportToExcel() {
-  if (typeof XLSX === "undefined") {
-    toast("Libreria XLSX in caricamento, riprova tra qualche secondo.");
-    return;
-  }
+  if (typeof XLSX === "undefined") return toast("Libreria XLSX in caricamento...");
   const wb = XLSX.utils.book_new();
+  const sheetData = [];
+
+  sheetData.push([`PROGRAMMA ATTUALE — ${plan.title || "SCHEDA"} — ${new Date().toLocaleDateString("it-IT")}`]);
+  
+  const header = ["Gruppo Muscolare", "Esercizio"];
+  for (let w = 1; w <= plan.weeks; w++) {
+    header.push(`S${w}`);
+    header.push("kg");
+  }
+  sheetData.push(header);
 
   plan.days.forEach((day) => {
-    const sheetData = [];
-    sheetData.push(["SCHEDA DI ALLENAMENTO", plan.title || "Programma"]);
-    sheetData.push(["Giorno:", day.name]);
-    sheetData.push([]);
-
-    const header = ["Gruppo", "Esercizio", "Rest"];
-    for (let w = 1; w <= plan.weeks; w++) {
-      header.push(`S${w} Schema`);
-      header.push(`S${w} Kg`);
-    }
-    sheetData.push(header);
-
+    sheetData.push([day.name.toUpperCase(), "", ...Array(plan.weeks * 2).fill("")]);
     day.rows.forEach((r) => {
-      const row = [r.group || "", r.ex || "", r.rest || ""];
+      const row = [r.group || "", r.ex || ""];
       for (let w = 0; w < plan.weeks; w++) {
         row.push(r.scheme[w] || "");
         const ser = seriesOf(r.scheme[w]);
         if (ser) {
-          const kgs = ser.map((_, si) => plan.kg[kgKey(r.id, w, si)] || "-").join("/");
+          const kgs = ser.map((_, si) => plan.kg[kgKey(r.id, w, si)] || "").filter(Boolean).join("/");
           row.push(kgs);
         } else {
           row.push(plan.kg[kgKey(r.id, w, 0)] || "");
@@ -334,15 +335,122 @@ function exportToExcel() {
       }
       sheetData.push(row);
     });
-
-    const ws = XLSX.utils.aoa_to_sheet(sheetData);
-    const safeSheetName = (day.name || "Giorno").replace(/[:\\/?*\[\]]/g, " ").slice(0, 30);
-    XLSX.utils.book_append_sheet(wb, ws, safeSheetName);
   });
 
-  const fileName = `${(plan.title || "Scheda").replace(/\s+/g, "_")}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+  XLSX.utils.book_append_sheet(wb, ws, "Programma Attuale");
+
+  const libHeaders = GROUPS;
+  const libRows = [libHeaders];
+  const maxLen = Math.max(...GROUPS.map(g => (plan.library[g] || []).length), 1);
+  for (let i = 0; i < maxLen; i++) {
+    const row = GROUPS.map(g => (plan.library[g] || [])[i] || "");
+    libRows.push(row);
+  }
+  const wsLib = XLSX.utils.aoa_to_sheet(libRows);
+  XLSX.utils.book_append_sheet(wb, wsLib, "Libreria Esercizi");
+
+  const fileName = `Scheda_Modulare_${new Date().toISOString().slice(0, 10)}.xlsx`;
   XLSX.writeFile(wb, fileName);
-  toast("Esportazione Excel completata!");
+  toast("File Excel esportato con successo!");
+}
+
+async function parseAndImportExcel(file) {
+  if (typeof XLSX === "undefined") return toast("Libreria XLSX in caricamento...");
+  try {
+    const data = new Uint8Array(await file.arrayBuffer());
+    const workbook = XLSX.read(data, { type: 'array' });
+
+    let sheet = workbook.Sheets['Programma Attuale'] || workbook.Sheets[workbook.SheetNames[0]];
+    if (!sheet) throw new Error("Foglio di calcolo non valido.");
+
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+    if (!rows || rows.length === 0) throw new Error("File vuoto o non leggibile.");
+
+    let title = "Scheda Importata";
+    if (rows[0] && rows[0][0]) {
+      const titleStr = String(rows[0][0]);
+      if (titleStr.includes("PROGRAMMA ATTUALE")) title = titleStr.replace("PROGRAMMA ATTUALE — ", "").split(" — ")[0] || "Scheda Importata";
+    }
+
+    const importedDays = [];
+    let currentDay = null;
+    let weeksCount = 5;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || row.length === 0) continue;
+
+      const firstCol = String(row[0] || "").trim();
+
+      if (firstCol.toUpperCase().startsWith("GIORNO")) {
+        currentDay = { name: firstCol, rows: [] };
+        importedDays.push(currentDay);
+        continue;
+      }
+
+      if (currentDay && row.length >= 2 && row[1]) {
+        const group = firstCol || "Petto";
+        const ex = String(row[1] || "").trim();
+        const scheme = [];
+
+        for (let c = 2; c < row.length; c += 2) {
+          scheme.push(String(row[c] || "").trim());
+        }
+
+        while (scheme.length < weeksCount) scheme.push("");
+        if (scheme.length > weeksCount) weeksCount = scheme.length;
+
+        currentDay.rows.push({
+          id: newId(),
+          group: GROUPS.includes(group) ? group : "Petto",
+          ex: ex,
+          scheme: scheme,
+          rest: "1'30\""
+        });
+      }
+    }
+
+    if (importedDays.length === 0) throw new Error("Nessun giorno o esercizio trovato nel file Excel.");
+
+    let importedLibrary = clone(SEED_LIBRARY);
+    if (workbook.Sheets['Libreria Esercizi']) {
+      const libSheet = XLSX.utils.sheet_to_json(workbook.Sheets['Libreria Esercizi'], { header: 1 });
+      if (libSheet && libSheet.length > 1) {
+        const headers = libSheet[0].map(h => String(h || "").trim());
+        headers.forEach((h, colIdx) => {
+          if (GROUPS.includes(h)) {
+            const list = [];
+            for (let r = 1; r < libSheet.length; r++) {
+              const val = String(libSheet[r][colIdx] || "").trim();
+              if (val) list.push(val);
+            }
+            if (list.length > 0) importedLibrary[h] = list;
+          }
+        });
+      }
+    }
+
+    const newPlanData = normalize({
+      title: title,
+      weeks: weeksCount,
+      days: importedDays,
+      library: importedLibrary,
+      rm: { bw: "", lifts: {} },
+      kg: {},
+      createdAt: Date.now()
+    });
+
+    plan = newPlanData;
+    await setDoc(ref, clone(newPlanData));
+    hist.undo = []; hist.redo = []; hist.typing = null;
+    ui.day = 0; ui.week = 0;
+    render();
+    toast("Scheda Excel importata ed applicata con successo!");
+  } catch (err) {
+    console.error(err);
+    toast("Errore durante l'importazione dell'Excel: " + err.message);
+  }
 }
 
 /* ---------- azioni ---------- */
@@ -357,11 +465,9 @@ function download(name, text) {
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-/* ---------- ascolto e gestione utente / client ---------- */
 function listenToUid(targetId) {
   if (unsub) { unsub(); unsub = null; }
   
-  // Sanificazione dell'identificatore (sostituisce caratteri non validi per i percorsi Firestore se inserita una mail)
   const safePathId = targetId.trim().toLowerCase().replace(/[@.]/g, "_");
   activeUid = safePathId;
   
@@ -373,7 +479,6 @@ function listenToUid(targetId) {
       if (snap.metadata.fromCache) {
         showMsg("<p>Connessione in corso...</p>");
       } else {
-        // Se la scheda non esiste ancora (nuovo utente o prima creazione da parte dell'Admin)
         showOnboarding();
       }
       return;
@@ -385,14 +490,13 @@ function listenToUid(targetId) {
       if (a && view.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return;
     }
     
-    // Assegna i dati caricati e forza il rendering completo dell'interfaccia
     plan = normalize(snap.data());
     render();
   }, (err) => {
     console.error("Firestore Error:", err);
-    showMsg(`<h1>Accesso o caricamento fallito</h1><p>${
+    showMsg(`<h1>Accesso fallito</h1><p>${
       err.code === "permission-denied"
-        ? "Non hai i permessi per accedere a questa scheda o l'email non è autorizzata."
+        ? "Impossibile accedere alla scheda richiesta."
         : esc(err.message)
     }</p><button class="btn" data-a="admin-reset">Torna alla Mia Scheda</button>`);
   });
@@ -410,7 +514,7 @@ async function handleAction(a, t) {
     case "logout": await signOut(auth); return;
     case "admin-load": {
       const target = ($("#adminTargetUid")?.value || "").trim();
-      if (!target) return toast("Inserisci un UID valido.");
+      if (!target) return toast("Inserisci un Email o UID valido.");
       listenToUid(target);
       return;
     }
@@ -418,15 +522,12 @@ async function handleAction(a, t) {
       if (user) listenToUid(user.uid);
       return;
     case "seed": case "empty":
-  	try {
-	    const newPlan = buildPlan(a === "seed");
-	    plan = newPlan; // Forziamo subito il piano locale per l'interfaccia
-	    await setDoc(ref, newPlan);
-	    render();
-	  } catch (e) { 
-	    onErr(e); 
-	  } 
-	  return;
+      try {
+        const newPlan = buildPlan(a === "seed");
+        plan = newPlan;
+        await setDoc(ref, clone(newPlan));
+        render();
+      } catch (e) { onErr(e); } return;
     case "tab": ui.tab = t.dataset.t; break;
     case "day": ui.day = +t.dataset.i; break;
     case "week": ui.week = +t.dataset.i; break;
@@ -457,6 +558,7 @@ async function handleAction(a, t) {
     }
     case "lib-del": pushUndo(); plan.library[t.dataset.g].splice(+t.dataset.i, 1); saveStruct(); break;
     case "export-excel": exportToExcel(); return;
+    case "import-excel": $("#importExcelFile").click(); return;
     case "export": download(`scheda-${new Date().toISOString().slice(0, 10)}.json`,
       JSON.stringify(clone({ title: plan.title, weeks: plan.weeks, days: plan.days,
         library: plan.library, rm: plan.rm, kg: plan.kg }), null, 1)); return;
@@ -484,6 +586,7 @@ function onInput(e) {
   if (f === "scheme") { typing("s" + row.id + ds.w); row.scheme[+ds.w] = el.value; saveStruct(); }
   if (f === "rest") { typing("r" + row.id); row.rest = el.value; saveStruct(); }
 }
+
 function onChange(e) {
   const el = e.target, f = el.dataset.f, card = el.closest("[data-row]");
   const row = card && findRow(card.dataset.row)?.r; if (!row) return;
@@ -503,10 +606,12 @@ function onChange(e) {
     setExercise(row, v); saveStruct(); render();
   }
 }
+
 document.addEventListener("click", (e) => { const t = e.target.closest("[data-a]"); if (t) handleAction(t.dataset.a, t); });
 view.addEventListener("input", onInput);
 view.addEventListener("change", onChange);
 view.addEventListener("focusout", () => { hist.typing = null; });
+
 $("#importFile").addEventListener("change", async (e) => {
   const file = e.target.files[0]; e.target.value = ""; if (!file) return;
   try {
@@ -518,6 +623,12 @@ $("#importFile").addEventListener("change", async (e) => {
     hist.undo = []; hist.redo = []; hist.typing = null;
     ui.day = 0; ui.week = 0;
   } catch (err) { toast("Importazione non riuscita: " + err.message); }
+});
+
+$("#importExcelFile").addEventListener("change", async (e) => {
+  const file = e.target.files[0]; e.target.value = ""; if (!file) return;
+  if (!confirm(`Importare la scheda dal file Excel "${file.name}" per l'utente attivo?`)) return;
+  await parseAndImportExcel(file);
 });
 
 /* ---------- autenticazione e sync ---------- */
