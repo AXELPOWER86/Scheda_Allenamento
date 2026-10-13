@@ -540,7 +540,7 @@ async function loadAliases() {
     const snap = await getDoc(doc(db, "admin", "aliases"));
     aliasesCache = snap.exists() ? snap.data() : {};
   } catch (e) {
-    console.error("Error loading aliases:", e);
+    // Normal users don't have read access to admin/aliases, which is expected
     aliasesCache = {};
   }
 }
@@ -553,7 +553,6 @@ async function listenToUid(targetInput) {
   const cleanTarget = targetInput.trim();
   const lowerAlias = cleanTarget.toLowerCase();
   
-  // Risoluzione alias se presente, altrimenti usa direttamente il target (es. UID)
   const targetUid = aliasesCache[lowerAlias] || aliasesCache[cleanTarget] || cleanTarget;
   
   activeUid = targetUid;
@@ -725,7 +724,7 @@ $("#importFile").addEventListener("change", async (e) => {
 });
 
 $("#importExcelFile").addEventListener("change", async (e) => {
-  const file = e.target.files[0]; e.target.value = ""; if not file return;
+  const file = e.target.files[0]; e.target.value = ""; if (!file) return;
   if (!confirm(`Importare la scheda, i carichi ed il Calcolatore dal file Excel "${file.name}" per l'utente attivo?`)) return;
   await parseAndImportExcel(file);
 });
