@@ -149,6 +149,7 @@ function showOnboarding() {
 }
 function renderHeader() {
   const isAdmin = user?.email === ADMIN_EMAIL;
+  const isViewingOther = activeUid && activeUid !== user?.uid;
   hdr.innerHTML = `<b>${esc(plan?.title || "Scheda allenamento")}</b>
     <div><span>${esc((user?.displayName || user?.email || "").split(" ")[0])}${isAdmin ? " (Admin)" : ""}</span>
     <button data-a="logout">Esci</button></div>`;
@@ -164,7 +165,7 @@ function renderAdminSection() {
       <button class="btn" data-a="admin-load">Carica Utente</button>
       ${isViewingOther ? `<button class="btn ghost" data-a="admin-reset">Torna alla Mia Scheda</button>` : ""}
     </div>
-    ${isViewingOther ? `<p class="note" style="color:var(--pri)">Stai gestendo la scheda dell'utente: <b>${esc(activeUid)}</b></p>` : ""}
+    ${isViewingOther ? `<p class="note" style="color:var(--pri)"> Stai gestendo la scheda dell'utente: <b>${esc(activeUid)}</b></p>` : ""}
   </div>`;
 }
 
@@ -298,34 +299,34 @@ function viewOpz() {
     <p class="note">Consiglio: esporta la scheda prima di azzerare i kg o di cambiare mesociclo.</p>`;
 }
 
-/* ---------- esportazione excel strutturata come il template originale ---------- */
+/* ---------- esportazione excel ---------- */
 function exportToExcel() {
   if (typeof XLSX === "undefined") {
     toast("Libreria XLSX in caricamento, riprova tra qualche secondo.");
     return;
   }
   const wb = XLSX.utils.book_new();
-  const sheetData = [];
-
-  sheetData.utils = {};
-  sheetData.push([`PROGRAMMA ATTUALE — ${plan.title || "SCHEDA"} — ${new Date().toLocaleDateString("it-IT")}`]);
-  
-  const header = ["Gruppo Muscolare", "Esercizio"];
-  for (let w = 1; w <= plan.weeks; w++) {
-    header.push(`S${w}`);
-    header.push("kg");
-  }
-  sheetData.push(header);
 
   plan.days.forEach((day) => {
-    sheetData.push([day.name.toUpperCase(), "", ...Array(plan.weeks * 2).fill("")]);
+    const sheetData = [];
+    sheetData.push(["SCHEDA DI ALLENAMENTO", plan.title || "Programma"]);
+    sheetData.push(["Giorno:", day.name]);
+    sheetData.push([]);
+
+    const header = ["Gruppo", "Esercizio", "Rest"];
+    for (let w = 1; w <= plan.weeks; w++) {
+      header.push(`S${w} Schema`);
+      header.push(`S${w} Kg`);
+    }
+    sheetData.push(header);
+
     day.rows.forEach((r) => {
-      const row = [r.group || "", r.ex || ""];
+      const row = [r.group || "", r.ex || "", r.rest || ""];
       for (let w = 0; w < plan.weeks; w++) {
         row.push(r.scheme[w] || "");
         const ser = seriesOf(r.scheme[w]);
         if (ser) {
-          const kgs = ser.map((_, si) => plan.kg[kgKey(r.id, w, si)] || "").filter(Boolean).join("/");
+          const kgs = ser.map((_, si) => plan.kg[kgKey(r.id, w, si)] || "-").join("/");
           row.push(kgs);
         } else {
           row.push(plan.kg[kgKey(r.id, w, 0)] || "");
@@ -333,25 +334,15 @@ function exportToExcel() {
       }
       sheetData.push(row);
     });
+
+    const ws = XLSX.utils.aoa_to_sheet(sheetData);
+    const safeSheetName = (day.name || "Giorno").replace(/[:\\/?*\[\]]/g, " ").slice(0, 30);
+    XLSX.utils.book_append_sheet(wb, ws, safeSheetName);
   });
 
-  const ws = XLSX.utils.aoa_to_sheet(sheetData);
-  XLSX.utils.book_append_sheet(wb, ws, "Programma Attuale");
-
-  // Aggiungiamo anche il foglio Libreria Esercizi per completezza strutturale
-  const libHeaders = GROUPS;
-  const libRows = [libHeaders];
-  const maxLen = Math.max(...GROUPS.map(g => (plan.library[g] || []).length), 1);
-  for (let i = 0; i < maxLen; i++) {
-    const row = GROUPS.map(g => (plan.library[g] || [])[i] || "");
-    libRows.push(row);
-  }
-  const wsLib = XLSX.utils.aoa_to_sheet(libRows);
-  XLSX.utils.book_append_sheet(wb, wsLib, "Libreria Esercizi");
-
-  const fileName = `Scheda_Modulare_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  const fileName = `${(plan.title || "Scheda").replace(/\s+/g, "_")}_${new Date().toISOString().slice(0, 10)}.xlsx`;
   XLSX.writeFile(wb, fileName);
-  toast("File Excel esportato con successo!");
+  toast("Esportazione Excel completata!");
 }
 
 /* ---------- azioni ---------- */
@@ -366,35 +357,44 @@ function download(name, text) {
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-function listenToUid(uid) {
+/* ---------- ascolto e gestione utente / client ---------- */
+function listenToUid(targetId) {
   if (unsub) { unsub(); unsub = null; }
-  activeUid = uid;
+  
+  // Sanificazione dell'identificatore (sostituisce caratteri non validi per i percorsi Firestore se inserita una mail)
+  const safePathId = targetId.trim().toLowerCase().replace(/[@.]/g, "_");
+  activeUid = safePathId;
+  
   ref = doc(db, "users", activeUid, "plan", "main");
-  showMsg("<p>Caricamento...</p>");
+  showMsg("<p>Caricamento scheda in corso...</p>");
+  
   unsub = onSnapshot(ref, (snap) => {
     if (!snap.exists()) {
       if (snap.metadata.fromCache) {
         showMsg("<p>Connessione in corso...</p>");
       } else {
-        if (activeUid === user?.uid) {
-          showOnboarding();
-        } else {
-          showMsg(`<h1>Utente non trovato</h1><p>Nessuna scheda trovata per l'utente: ${esc(activeUid)}</p><button class="btn" data-a="admin-reset">Torna indietro</button>`);
-        }
+        // Se la scheda non esiste ancora (nuovo utente o prima creazione da parte dell'Admin)
+        showOnboarding();
       }
       return;
     }
+    
     if (rendered) {
       if (snap.metadata.hasPendingWrites || timers.size) return;
       const a = document.activeElement;
       if (a && view.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return;
     }
+    
+    // Assegna i dati caricati e forza il rendering completo dell'interfaccia
     plan = normalize(snap.data());
     render();
   }, (err) => {
-    showMsg(`<h1>Accesso negato</h1><p>${err.code === "permission-denied"
-      ? "Impossibile accedere alla scheda richiesta."
-      : esc(err.message)}</p><button class="btn" data-a="admin-reset">Torna alla Mia Scheda</button>`);
+    console.error("Firestore Error:", err);
+    showMsg(`<h1>Accesso o caricamento fallito</h1><p>${
+      err.code === "permission-denied"
+        ? "Non hai i permessi per accedere a questa scheda o l'email non è autorizzata."
+        : esc(err.message)
+    }</p><button class="btn" data-a="admin-reset">Torna alla Mia Scheda</button>`);
   });
 }
 
@@ -410,7 +410,7 @@ async function handleAction(a, t) {
     case "logout": await signOut(auth); return;
     case "admin-load": {
       const target = ($("#adminTargetUid")?.value || "").trim();
-      if (!target) return toast("Inserisci un UID o Email valido.");
+      if (!target) return toast("Inserisci un UID valido.");
       listenToUid(target);
       return;
     }
@@ -418,7 +418,15 @@ async function handleAction(a, t) {
       if (user) listenToUid(user.uid);
       return;
     case "seed": case "empty":
-      try { await setDoc(ref, buildPlan(a === "seed")); } catch (e) { onErr(e); } return;
+  	try {
+	    const newPlan = buildPlan(a === "seed");
+	    plan = newPlan; // Forziamo subito il piano locale per l'interfaccia
+	    await setDoc(ref, newPlan);
+	    render();
+	  } catch (e) { 
+	    onErr(e); 
+	  } 
+	  return;
     case "tab": ui.tab = t.dataset.t; break;
     case "day": ui.day = +t.dataset.i; break;
     case "week": ui.week = +t.dataset.i; break;
