@@ -423,7 +423,7 @@ async function parseAndImportExcel(file) {
 
     headerRow.forEach((h, idx) => {
       const text = String(h || "").trim().toUpperCase();
-      if (text.startsWith("S") && !isNaN(text.slice(1))) {
+      if (/^S[1-9][0-9]?$/.test(text)) {
         const wNum = parseInt(text.slice(1)) - 1;
         const nextColText = String(headerRow[idx + 1] || "").trim().toLowerCase();
         const kgCol = (nextColText === "kg") ? idx + 1 : -1;
