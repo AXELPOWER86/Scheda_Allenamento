@@ -44,7 +44,7 @@ const kgKey = (id, w, s) => (s ? `${id}_${w}_${s}` : `${id}_${w}`);
 
 /* ---------- annulla / ripeti ---------- */
 const hist = { undo: [], redo: [], typing: null };
-const snapStruct = () => clone({ days: plan.days, library: plan.library, weeks: plan.weeks, title: plan.title });
+const snapStruct = () => clone({ days: plan.days, library: plan.library, weeks: plan.weeks, title: plan.title, rm: plan.rm });
 function pushUndo() {
   if (!plan) return;
   hist.undo.push({ s: snapStruct(), kgLost: {} });
@@ -95,7 +95,7 @@ const saveKg = (key, val) => debounced("kg" + key, 500,
   () => save({ ["kg." + key]: val === "" ? deleteField() : val }));
 const saveRm = (path, val) => debounced("rm" + path, 500, () => save({ ["rm." + path]: val }));
 const saveStruct = () => debounced("struct", 400, () => save(clone(
-  { days: plan.days, library: plan.library, weeks: plan.weeks, title: plan.title })));
+  { days: plan.days, library: plan.library, weeks: plan.weeks, title: plan.title, rm: plan.rm })));
 
 /* ---------- dati ---------- */
 function normalize(p) {
@@ -308,8 +308,9 @@ function viewOpz() {
 function exportToExcel() {
   if (typeof XLSX === "undefined") return toast("Libreria XLSX in caricamento...");
   const wb = XLSX.utils.book_new();
-  const sheetData = [];
 
+  // 1. Foglio: Programma Attuale
+  const sheetData = [];
   sheetData.push([`PROGRAMMA ATTUALE — ${plan.title || "SCHEDA"} — ${new Date().toLocaleDateString("it-IT")}`]);
   
   const header = ["Gruppo Muscolare", "Esercizio"];
@@ -340,6 +341,34 @@ function exportToExcel() {
   const ws = XLSX.utils.aoa_to_sheet(sheetData);
   XLSX.utils.book_append_sheet(wb, ws, "Programma Attuale");
 
+  // 2. Foglio: Calcolatore %1RM
+  const calcData = [];
+  calcData.push(["CALCOLATORE MASSIMALI (1RM)"]);
+  calcData.push(["Peso corporeo (kg)", plan.rm.bw || ""]);
+  calcData.push([]);
+  
+  const calcHeader = ["Alzata", "1RM (kg)", ...PCTS.map(p => `${p}%`)];
+  calcData.push(calcHeader);
+
+  const bw = num(plan.rm.bw);
+  LIFTS.forEach(([k, name, bwBased]) => {
+    const one = num(plan.rm.lifts[k]);
+    const row = [name, plan.rm.lifts[k] || ""];
+    PCTS.forEach((p) => {
+      if (isNaN(one) || (bwBased && isNaN(bw))) {
+        row.push("");
+      } else {
+        const v = bwBased ? (p / 100) * (bw + one) - bw : (p / 100) * one;
+        row.push(v.toFixed(1));
+      }
+    });
+    calcData.push(row);
+  });
+
+  const wsCalc = XLSX.utils.aoa_to_sheet(calcData);
+  XLSX.utils.book_append_sheet(wb, wsCalc, "Calcolatore %1RM");
+
+  // 3. Foglio: Libreria Esercizi
   const libHeaders = GROUPS;
   const libRows = [libHeaders];
   const maxLen = Math.max(...GROUPS.map(g => (plan.library[g] || []).length), 1);
@@ -352,7 +381,7 @@ function exportToExcel() {
 
   const fileName = `Scheda_Modulare_${new Date().toISOString().slice(0, 10)}.xlsx`;
   XLSX.writeFile(wb, fileName);
-  toast("File Excel esportato con successo!");
+  toast("File Excel esportato con successo (incluso Calcolatore)!");
 }
 
 async function parseAndImportExcel(file) {
@@ -450,12 +479,33 @@ async function parseAndImportExcel(file) {
       }
     }
 
+    // Importazione Calcolatore se presente nel foglio Excel
+    const importedRm = { bw: "", lifts: {} };
+    const calcSheet = workbook.Sheets['Calcolatore %1RM'] || workbook.Sheets['Calcolatore'];
+    if (calcSheet) {
+      const calcRows = XLSX.utils.sheet_to_json(calcSheet, { header: 1 });
+      calcRows.forEach((r) => {
+        if (!r || r.length < 2) return;
+        const col0 = String(r[0] || "").trim();
+        const col1 = String(r[1] || "").trim();
+        if (col0.toLowerCase().includes("peso corporeo")) {
+          importedRm.bw = col1;
+        } else {
+          LIFTS.forEach(([k, name]) => {
+            if (col0.toLowerCase() === name.toLowerCase()) {
+              importedRm.lifts[k] = col1;
+            }
+          });
+        }
+      });
+    }
+
     const newPlanData = normalize({
       title: title,
       weeks: weeksCount,
       days: importedDays,
       library: importedLibrary,
-      rm: { bw: "", lifts: {} },
+      rm: importedRm,
       kg: importedKg,
       createdAt: Date.now()
     });
@@ -465,7 +515,7 @@ async function parseAndImportExcel(file) {
     hist.undo = []; hist.redo = []; hist.typing = null;
     ui.day = 0; ui.week = 0;
     render();
-    toast("Scheda e carichi Excel importati con successo!");
+    toast("Scheda, carichi e Calcolatore importati con successo!");
   } catch (err) {
     console.error(err);
     toast("Errore durante l'importazione dell'Excel: " + err.message);
@@ -647,7 +697,7 @@ $("#importFile").addEventListener("change", async (e) => {
 
 $("#importExcelFile").addEventListener("change", async (e) => {
   const file = e.target.files[0]; e.target.value = ""; if (!file) return;
-  if (!confirm(`Importare la scheda ed i carichi dal file Excel "${file.name}" per l'utente attivo?`)) return;
+  if (!confirm(`Importare la scheda, i carichi ed il Calcolatore dal file Excel "${file.name}" per l'utente attivo?`)) return;
   await parseAndImportExcel(file);
 });
 
