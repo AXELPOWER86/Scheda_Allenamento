@@ -24,6 +24,9 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
 const newId = () => "r" + Math.random().toString(36).slice(2, 8);
 const num = (v) => parseFloat(String(v ?? "").replace(",", "."));
 const clone = (o) => JSON.parse(JSON.stringify(o));
+const nk = (s) => String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+const tidy = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+let normChanged = false;
 const view = $("#view"), hdr = $("#hdr"), nav = $("#nav");
 
 /* ---------- stato ---------- */
@@ -35,6 +38,25 @@ const db = initializeFirestore(app, {
 let user = null, activeUid = null, ref = null, unsub = null, plan = null, rendered = false;
 let dirCache = [];   // solo admin: [{uid, email, name, alias}]
 const ui = { tab: "scheda", day: 0, week: 0, edit: false };
+let lastUi = "";
+const uiKey = () => `scheda:ui:${user?.uid}:${activeUid}`;
+function restoreUi() {
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem(uiKey()) || "null"); } catch {}
+  if (!s && activeUid === user?.uid) s = plan?.ui;      // browser svuotato: usa la copia su Firestore
+  ui.tab = ["scheda", "calc", "opz"].includes(s?.tab) ? s.tab : "scheda";
+  ui.day = Number.isInteger(s?.day) && s.day >= 0 ? s.day : 0;
+  ui.week = Number.isInteger(s?.week) && s.week >= 0 ? s.week : 0;
+  ui.edit = false;
+  lastUi = JSON.stringify({ tab: ui.tab, day: ui.day, week: ui.week });
+}
+function saveUi() {
+  const s = { tab: ui.tab, day: ui.day, week: ui.week }, j = JSON.stringify(s);
+  if (j === lastUi) return; lastUi = j;
+  try { localStorage.setItem(uiKey(), j); } catch {}
+  if (activeUid === user?.uid)                           // solo sulla propria scheda
+    debounced("ui", 1000, () => { if (activeUid === user?.uid && ref) save({ ui: s }); });
+}
 const timers = new Map();
 
 /* ---------- serie e carichi ---------- */
@@ -107,9 +129,24 @@ const saveStruct = () => debounced("struct", 400, () => save(clone(
 function normalize(p) {
   p.title ??= "Scheda"; p.weeks ??= 5; p.days ??= []; p.library ??= clone(SEED_LIBRARY);
   p.rm ??= {}; p.rm.bw ??= ""; p.rm.lifts ??= {}; p.kg ??= {};
+  for (const g of Object.keys(p.library)) {            // rubrica: pulizia e dedup
+    const src = p.library[g] || [], seen = new Set(), out = [];
+    for (const x of src) { const t = tidy(x), k = nk(t); if (t && !seen.has(k)) { seen.add(k); out.push(t); } }
+    if (out.length !== src.length || out.some((x, i) => x !== src[i])) normChanged = true;
+    p.library[g] = out;
+  }
   p.days.forEach((d) => { d.rows ??= []; d.rows.forEach((r) => {
     r.id ??= newId(); r.scheme ??= []; r.rest ??= ""; r.ex ??= "";
     while (r.scheme.length < p.weeks) r.scheme.push("");
+    const grp = GROUPS.find((g) => nk(g) === nk(r.group));
+    if (grp && grp !== r.group) { r.group = grp; normChanged = true; }
+    const t = tidy(r.ex);
+    if (t && r.group) {                                // allinea alla rubrica o aggiungilo
+      const lib = (p.library[r.group] ??= []);
+      const hit = lib.find((x) => nk(x) === nk(t));
+      if (hit) { if (r.ex !== hit) { r.ex = hit; normChanged = true; } }
+      else { lib.push(t); r.ex = t; normChanged = true; }
+    } else if (!t) r.ex = "";
   }); });
   return p;
 }
@@ -123,7 +160,7 @@ function findRow(id) {
     if (d.rows[i].id === id) return { d, i, r: d.rows[i] };
   return null;
 }
-const inLib = (g, ex) => (plan.library[g] || []).some((x) => x.toLowerCase() === ex.toLowerCase());
+const inLib = (g, ex) => (plan.library[g] || []).some((x) => nk(x) === nk(ex));
 const hasKg = (id) => Object.keys(plan.kg).some((k) => k.startsWith(id + "_"));
 function clearRowKg(id) {
   const lost = hist.undo.at(-1)?.kgLost;
@@ -250,10 +287,12 @@ function cardView(r, w) {
 }
 
 function exOptions(r) {
-  const list = [...(plan.library[r.group] || [])];
-  if (r.ex && !inLib(r.group, r.ex)) list.unshift(r.ex);
+  const list = [...(plan.library[r.group] || [])]
+    .sort((a, b) => a.localeCompare(b, "it", { sensitivity: "base" }));
+  const cur = list.find((x) => nk(x) === nk(r.ex));
+  if (r.ex && !cur) list.unshift(r.ex);
   return `<option value="">- scegli -</option>` +
-    list.map((x) => `<option ${x === r.ex ? "selected" : ""}>${esc(x)}</option>`).join("") +
+    list.map((x) => `<option ${x === (cur ?? r.ex) ? "selected" : ""}>${esc(x)}</option>`).join("") +
     `<option value="__new">+ Nuovo esercizio...</option>`;
 }
 
@@ -299,8 +338,9 @@ function updateCalc() {
 function viewOpz() {
   return `<div class="sec">Libreria esercizi</div>
     ${GROUPS.map((g) => `<details><summary>${g} (${(plan.library[g] || []).length})</summary>
-      <div class="tags">${(plan.library[g] || []).map((x, i) =>
-        `<span class="tag">${esc(x)}<button data-a="lib-del" data-g="${g}" data-i="${i}">&times;</button></span>`).join("")}</div>
+      <div class="tags">${(plan.library[g] || []).map((x, i) => ({ x, i }))
+        .sort((a, b) => a.x.localeCompare(b.x, "it", { sensitivity: "base" }))
+        .map(({ x, i }) => `<span class="tag"><span>${esc(x)}</span><button data-a="lib-del" data-g="${g}" data-i="${i}">&times;</button></span>`).join("")}</div>
       <div class="erow"><input type="text" data-newex="${g}" placeholder="Nuovo esercizio" style="flex:1">
       <button class="btn" data-a="lib-add" data-g="${g}">Aggiungi</button></div></details>`).join("")}
     <div class="sec">Dati ed Esportazione / Importazione</div>
@@ -638,7 +678,10 @@ async function listenToUid(uid) {
       const a = document.activeElement;
       if (a && view.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return;
     }
+    normChanged = false;
     plan = normalize(snap.data());
+    if (!rendered) restoreUi();
+    if (normChanged && activeUid === user?.uid) { normChanged = false; saveStruct(); }
     render();
   }, (err) => {
     console.error("Firestore Error:", err);
@@ -689,9 +732,9 @@ async function handleAction(a, t) {
         await setDoc(ref, clone(newPlan));
         render();
       } catch (e) { onErr(e); } return;
-    case "tab": ui.tab = t.dataset.t; break;
-    case "day": ui.day = +t.dataset.i; break;
-    case "week": ui.week = +t.dataset.i; break;
+    case "tab": ui.tab = t.dataset.t; saveUi(); break;
+    case "day": ui.day = +t.dataset.i; saveUi(); break;
+    case "week": ui.week = +t.dataset.i; saveUi(); break;
     case "edit": ui.edit = !ui.edit; break;
     case "undo": undo(); return;
     case "redo": redo(); return;
@@ -712,9 +755,9 @@ async function handleAction(a, t) {
       if (plan.weeks <= 1 || !confirm(`Rimuovere la settimana S${plan.weeks}? I kg gia' segnati restano salvati.`)) return;
       pushUndo(); plan.weeks--; saveStruct(); break;
     case "lib-add": {
-      const g = t.dataset.g, inp = view.querySelector(`[data-newex="${g}"]`), v = inp.value.trim();
+      const g = t.dataset.g, inp = view.querySelector(`[data-newex="${g}"]`), v = tidy(inp.value);
       if (!v) return;
-      if (inLib(g, v)) return;
+      if (inLib(g, v)) return toast("Esercizio gia' presente in libreria.");
       pushUndo(); (plan.library[g] ??= []).push(v); saveStruct(); break;
     }
     case "lib-del": pushUndo(); plan.library[t.dataset.g].splice(+t.dataset.i, 1); saveStruct(); break;
@@ -757,9 +800,9 @@ function onChange(e) {
   } else if (f === "ex") {
     let v = el.value;
     if (v === "__new") {
-      v = (prompt(`Nome del nuovo esercizio (${row.group}):`) || "").trim();
+      v = tidy(prompt(`Nome del nuovo esercizio (${row.group}):`) || "");
       if (!v) { render(); return; }
-      const existing = (plan.library[row.group] || []).find((x) => x.toLowerCase() === v.toLowerCase());
+      const existing = (plan.library[row.group] || []).find((x) => nk(x) === nk(v));
       pushUndo();
       if (existing) v = existing; else (plan.library[row.group] ??= []).push(v);
     } else pushUndo();
