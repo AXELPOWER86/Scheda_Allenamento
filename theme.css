@@ -3,14 +3,18 @@
    Per tornare al look precedente basta togliere quel <link>. Non modifica nessun file JS. */
 :root{
   --o1:#ff8c26; --o2:#ff6600; --o3:#f05a00;     /* arancio: chiaro -> pieno -> profondo */
-  --on-pri:#140a00;                              /* testo sopra l'arancio (contrasto >= 5,4:1) */
   --bg1:#181818; --bg2:#0b0b0b;
   --card1:#262626; --card2:#171717;
   --kg1:#313131; --kg2:#232323;
   --bad2:#ff6b66;
+  --btn-text:#fff;                               /* testo sui pulsanti arancio (come nel riferimento) */
+  --font-display:"Barlow Condensed","Oswald","Roboto Condensed","Arial Narrow",system-ui,sans-serif;
   --glow:rgba(255,102,0,.35);
   --shadow:0 1px 0 rgba(255,255,255,.05) inset,0 8px 20px rgba(0,0,0,.45);
 }
+
+/* utenti con 'contrasto elevato' attivo nel sistema: testo scuro sull'arancio (contrasto >= 5,7:1) */
+@media (prefers-contrast:more){:root{--btn-text:#140a00}}
 
 /* ---- sfondo: bagliore arancio in alto + sfumatura nera (fisso, funziona anche su iOS) ---- */
 body{background:#0d0d0d;min-height:100vh;min-height:100dvh}
@@ -26,20 +30,17 @@ header{background:linear-gradient(180deg,#262626 0%,#050505 100%);
 header button{background:linear-gradient(180deg,rgba(255,102,0,.30),rgba(255,102,0,.12))}
 header button:hover{background:linear-gradient(135deg,var(--o1),var(--o2));color:var(--on-pri)}
 nav{background:linear-gradient(0deg,#050505,#202020);box-shadow:0 -6px 20px rgba(0,0,0,.55)}
-nav button.on{background:linear-gradient(180deg,rgba(255,102,0,.32),rgba(255,102,0,.04));color:var(--o1)}
+
 
 /* ---- chip giorno / settimana ---- */
 .chips{padding:6px 8px 12px;margin:0 -8px}        /* spazio per il bagliore della chip attiva */
 .chip{background:linear-gradient(180deg,#2c2c2c,#1b1b1b);box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
-.chip.on{background:linear-gradient(135deg,var(--o1),var(--o2) 55%,var(--o3));color:var(--on-pri);
-  border-color:transparent;box-shadow:0 3px 12px var(--glow)}
 .bar.sticky{background:rgba(15,15,15,.88);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 
 /* ---- card ---- */
 .card,details,.tbl{background:linear-gradient(160deg,var(--card1),var(--card2));
   border-color:#313131;box-shadow:var(--shadow)}
 .card{border-radius:14px}
-.scheme{text-shadow:0 0 16px var(--glow)}
 .tag{background:linear-gradient(135deg,var(--kg1),var(--kg2))}
 .tag button,.danger{color:var(--bad2)}
 .sec{padding-bottom:4px;border-bottom:1px solid transparent;
@@ -67,17 +68,6 @@ select:focus,input:focus,.kg input[type=text]:focus,.sk input:focus{
   border-color:var(--o2);box-shadow:0 0 0 3px rgba(255,102,0,.28)}
 input::placeholder{color:#b8b8b8;opacity:1;font-style:italic}   /* kg della settimana precedente: leggibili */
 
-/* ---- pulsanti ---- */
-.btn{background:linear-gradient(135deg,var(--o1),var(--o2) 55%,var(--o3));color:var(--on-pri);
-  box-shadow:0 4px 14px var(--glow)}
-.btn:hover{background:linear-gradient(135deg,#ffa040,var(--o1) 55%,var(--o2))}
-.btn:active{filter:brightness(.92)}
-.btn.ghost{background:linear-gradient(180deg,#2c2c2c,#1b1b1b);color:var(--o1);box-shadow:none}
-.btn.ghost:hover{background:linear-gradient(180deg,rgba(255,102,0,.30),rgba(255,102,0,.10));color:#ffb070}
-.btn.danger{background:linear-gradient(180deg,#2c2c2c,#1b1b1b);color:var(--bad2);box-shadow:none}
-.btn.danger:hover{background:linear-gradient(180deg,rgba(229,57,53,.32),rgba(229,57,53,.10));color:#ff8a86}
-.erow button:not(.btn){background:linear-gradient(180deg,#2c2c2c,#1b1b1b)}
-
 /* ---- tabella calcolatore ---- */
 thead tr{background:linear-gradient(180deg,#2a2a2a,#080808)}
 th{background:transparent}
@@ -89,11 +79,54 @@ td:first-child{background:linear-gradient(90deg,#232323,#1b1b1b)}
   box-shadow:0 0 0 1px rgba(255,102,0,.15),0 8px 20px rgba(0,0,0,.4)}
 .toast{background:linear-gradient(135deg,#2e2e2e,#151515);
   box-shadow:0 8px 24px rgba(0,0,0,.6),0 0 20px var(--glow)}
-.center h1{background:linear-gradient(90deg,#fff 30%,#ff9a4d);-webkit-background-clip:text;background-clip:text;
-  -webkit-text-fill-color:transparent;color:transparent}
 
-/* ---- ALTERNATIVA: testo bianco sui pulsanti arancio (come nel tuo style.css) ----
-   Il bianco su #ff6600 ha contrasto 2,9:1, sotto il minimo 4,5:1 per il testo piccolo.
-   Per tenerlo bianco serve un arancio piu' scuro: togli i simboli di commento attorno alla riga seguente
-   (contrasto del bianco: 4,6:1 / 4,8:1 / 5,3:1 sulle tre tinte). */
-/* :root{--o1:#c94f00;--o2:#c24e00;--o3:#b84700;--on-pri:#fff} */
+
+/* =====================  NEON + SATINATO  ===================== */
+/* ---- pulsanti: arancio neon con riflesso satinato, bordo chiaro e alone ---- */
+.btn,.chip.on{
+  color:var(--btn-text);text-shadow:0 1px 2px rgba(110,28,0,.65);
+  border:1px solid rgba(255,196,140,.85);
+  background:
+    linear-gradient(115deg,transparent 28%,rgba(255,255,255,.12) 44%,transparent 60%),   /* velo satinato diagonale */
+    linear-gradient(180deg,rgba(255,255,255,.20),rgba(255,255,255,0) 48%),               /* luce dall'alto */
+    linear-gradient(180deg,#f46c1b,#e45509 55%,#c74100);                                  /* corpo arancio */
+  box-shadow:0 0 0 1px rgba(255,120,30,.35),0 0 12px rgba(255,102,0,.70),0 0 30px rgba(255,102,0,.38),
+    inset 0 1px 0 rgba(255,235,210,.65),inset 0 -10px 18px rgba(140,35,0,.38)}
+.btn{font-family:var(--font-display);font-size:19px;font-weight:700;letter-spacing:.07em}
+.chip.on{box-shadow:0 0 0 1px rgba(255,120,30,.3),0 0 10px rgba(255,102,0,.6),
+    inset 0 1px 0 rgba(255,235,210,.6),inset 0 -6px 10px rgba(140,35,0,.35)}
+.btn:hover{filter:brightness(1.08) saturate(1.05)}
+.btn:active{filter:brightness(.94);box-shadow:0 0 0 1px rgba(255,120,30,.3),0 0 8px rgba(255,102,0,.55),
+    inset 0 2px 8px rgba(120,30,0,.5)}
+
+/* ghost = contorno neon, senza riempimento */
+.btn.ghost{background:linear-gradient(180deg,rgba(255,102,0,.16),rgba(255,102,0,.04));color:#ffb27a;
+  border:1px solid rgba(255,138,61,.9);text-shadow:0 0 8px rgba(255,102,0,.65);
+  box-shadow:0 0 10px rgba(255,102,0,.40),inset 0 0 12px rgba(255,102,0,.16)}
+.btn.ghost:hover{filter:none;background:linear-gradient(180deg,rgba(255,102,0,.32),rgba(255,102,0,.10));color:#ffd0a8}
+.btn.danger{background:linear-gradient(180deg,rgba(229,57,53,.18),rgba(229,57,53,.05));color:var(--bad2);
+  border:1px solid rgba(255,107,102,.85);text-shadow:0 0 8px rgba(229,57,53,.6);
+  box-shadow:0 0 10px rgba(229,57,53,.38),inset 0 0 12px rgba(229,57,53,.14)}
+.btn.danger:hover{filter:none;background:linear-gradient(180deg,rgba(229,57,53,.34),rgba(229,57,53,.10));color:#ff9a96}
+header button:hover{color:var(--btn-text)}
+
+/* ---- scritte: arancio satinato con alone neon ---- */
+.scheme,.sec,.center h1{
+  background:linear-gradient(180deg,#ffd9b0 0%,#ffa04c 38%,#ff6a12 72%,#ff5200 100%);
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;
+  filter:drop-shadow(0 0 7px rgba(255,102,0,.55))}           /* drop-shadow: il text-shadow trasparirebbe dal testo sfumato */
+.scheme,.sec,.center h1,header b,nav button,.admin-card h3{font-family:var(--font-display);letter-spacing:.04em}
+.scheme{font-size:26px;line-height:1.1}
+.sec{font-size:16px;letter-spacing:.1em;padding-bottom:6px;border-bottom:0;border-image:none}
+.sec::after{content:"";display:block;height:1px;margin-top:5px;               /* linea di luce come nel riferimento */
+  background:linear-gradient(90deg,transparent,#ff8a3d 18%,#ffd7b0 50%,#ff8a3d 82%,transparent);
+  box-shadow:0 0 8px rgba(255,102,0,.85)}
+.center h1{font-size:40px;line-height:1.05}
+summary,.admin-card h3,header span{color:#ff9a45;text-shadow:0 0 9px rgba(255,102,0,.6)}
+header b{font-size:20px}
+nav button{font-size:15px;letter-spacing:.06em}
+nav button.on{color:#ff9a45;text-shadow:0 0 10px rgba(255,102,0,.75);
+  background:linear-gradient(180deg,rgba(255,102,0,.34),rgba(255,102,0,.03));box-shadow:0 -2px 14px rgba(255,102,0,.45)}
+header{box-shadow:0 3px 16px rgba(255,102,0,.55)}
+select:focus,input:focus,.kg input[type=text]:focus,.sk input:focus{
+  border-color:#ff7a26;box-shadow:0 0 0 1px #ff6a12,0 0 14px rgba(255,102,0,.55)}
