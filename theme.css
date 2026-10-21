@@ -1,6 +1,10 @@
 /* theme.css - tema nero/arancio sfumato.
    Va caricato DOPO style.css:  <link rel="stylesheet" href="theme.css">
    Per tornare al look precedente basta togliere quel <link>. Non modifica nessun file JS. */
+@font-face{font-family:"Barlow Condensed";font-weight:600;font-display:swap;
+  src:url("fonts/barlow-condensed-600.woff2") format("woff2")}
+@font-face{font-family:"Barlow Condensed";font-weight:700;font-display:swap;
+  src:url("fonts/barlow-condensed-700.woff2") format("woff2")}
 :root{
   --o1:#ff8c26; --o2:#ff6600; --o3:#f05a00;     /* arancio: chiaro -> pieno -> profondo */
   --bg1:#181818; --bg2:#0b0b0b;
