@@ -3,7 +3,7 @@ import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChang
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
          doc, getDoc, setDoc, updateDoc, deleteField, onSnapshot,
-         collection, query, where, limit, getDocs, serverTimestamp }
+         collection, query, where, limit, getDocs, serverTimestamp, runTransaction, deleteDoc }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 import { SEED_DAYS, SEED_LIBRARY } from "./seed.js";
@@ -44,14 +44,15 @@ function restoreUi() {
   let s = null;
   try { s = JSON.parse(localStorage.getItem(uiKey()) || "null"); } catch {}
   if (!s && activeUid === user?.uid) s = plan?.ui;      // browser svuotato: usa la copia su Firestore
+  if (s && (s.pid || "") !== (plan?.planId || "")) s = null;   // la scheda e' cambiata: riparti dall'inizio
   ui.tab = ["scheda", "calc", "opz"].includes(s?.tab) ? s.tab : "scheda";
   ui.day = Number.isInteger(s?.day) && s.day >= 0 ? s.day : 0;
   ui.week = Number.isInteger(s?.week) && s.week >= 0 ? s.week : 0;
   ui.edit = false;
-  lastUi = JSON.stringify({ tab: ui.tab, day: ui.day, week: ui.week });
+  lastUi = JSON.stringify({ tab: ui.tab, day: ui.day, week: ui.week, pid: plan?.planId || "" });
 }
 function saveUi() {
-  const s = { tab: ui.tab, day: ui.day, week: ui.week }, j = JSON.stringify(s);
+  const s = { tab: ui.tab, day: ui.day, week: ui.week, pid: plan?.planId || "" }, j = JSON.stringify(s);
   if (j === lastUi) return; lastUi = j;
   try { localStorage.setItem(uiKey(), j); } catch {}
   if (activeUid === user?.uid)                           // solo sulla propria scheda
@@ -225,9 +226,9 @@ function render() {
   rendered = true; renderHeader();
   nav.innerHTML = [["scheda", "Scheda"], ["calc", "Calcolatore"], ["opz", "Impostazioni"]]
     .map(([t, l]) => `<button data-a="tab" data-t="${t}" class="${ui.tab === t ? "on" : ""}">${l}</button>`).join("");
-  view.innerHTML = (ui.tab === "scheda" ? viewScheda() : ui.tab === "calc" ? viewCalc() : viewOpz());
+  view.innerHTML = ui.preview ? viewPreview() : (ui.tab === "scheda" ? viewScheda() : ui.tab === "calc" ? viewCalc() : viewOpz());
   if (ui.tab === "calc") updateCalc();
-  if (ui.tab === "opz") fillDirList();
+  if (ui.tab === "opz" && !ui.preview) { fillDirList(); fillExtras(); }
 }
 
 /* --- scheda --- */
@@ -343,6 +344,7 @@ function viewOpz() {
         .map(({ x, i }) => `<span class="tag"><span>${esc(x)}</span><button data-a="lib-del" data-g="${g}" data-i="${i}">&times;</button></span>`).join("")}</div>
       <div class="erow"><input type="text" data-newex="${g}" placeholder="Nuovo esercizio" style="flex:1">
       <button class="btn" data-a="lib-add" data-g="${g}">Aggiungi</button></div></details>`).join("")}
+    <div id="extras"></div>
     <div class="sec">Dati ed Esportazione / Importazione</div>
     <div class="erow">
       <button class="btn" data-a="export-excel">Esporta Excel (.xlsx)</button>
@@ -357,34 +359,38 @@ function viewOpz() {
 }
 
 /* ---------- esportazione / importazione excel e json ---------- */
-function exportToExcel() {
+function exportToExcel(src, meta = {}) {
+  const p = src || plan;                                    // scheda attuale oppure una scheda dall'archivio
+  const rm = { bw: p.rm?.bw ?? "", lifts: p.rm?.lifts ?? {} };
+  const kgMap = p.kg || {};
+  const lib = p.library || plan?.library || {};
   if (typeof XLSX === "undefined") return toast("Libreria XLSX in caricamento...");
   const wb = XLSX.utils.book_new();
 
   const sheetData = [];
-  sheetData.push([`PROGRAMMA ATTUALE — ${plan.title || "SCHEDA"} — ${new Date().toLocaleDateString("it-IT")}`]);
+  sheetData.push([`PROGRAMMA ATTUALE — ${p.title || "SCHEDA"} — ${meta.when || new Date().toLocaleDateString("it-IT")}`]);
   
   const header = ["Gruppo Muscolare", "Esercizio"];
-  for (let w = 1; w <= plan.weeks; w++) {
+  for (let w = 1; w <= p.weeks; w++) {
     header.push(`S${w}`);
     header.push("kg");
   }
   header.push("Rest");
   sheetData.push(header);
 
-  plan.days.forEach((day) => {
-    sheetData.push([day.name.toUpperCase(), "", ...Array(plan.weeks * 2 + 1).fill("")]);
+  p.days.forEach((day) => {
+    sheetData.push([day.name.toUpperCase(), "", ...Array(p.weeks * 2 + 1).fill("")]);
     day.rows.forEach((r) => {
       const row = [r.group || "", r.ex || ""];
-      for (let w = 0; w < plan.weeks; w++) {
+      for (let w = 0; w < p.weeks; w++) {
         row.push(r.scheme[w] || "");
         const ser = seriesOf(r.scheme[w]);
         if (ser) {
-          const arr = ser.map((_, si) => plan.kg[kgKey(r.id, w, si)] || "");
+          const arr = ser.map((_, si) => kgMap[kgKey(r.id, w, si)] || "");
           const kgs = arr.some(Boolean) ? arr.join("/") : "";
           row.push(kgs);
         } else {
-          row.push(plan.kg[kgKey(r.id, w, 0)] || "");
+          row.push(kgMap[kgKey(r.id, w, 0)] || "");
         }
       }
       row.push(r.rest || "");
@@ -397,16 +403,16 @@ function exportToExcel() {
 
   const calcData = [];
   calcData.push(["CALCOLATORE MASSIMALI (1RM)"]);
-  calcData.push(["Peso corporeo (kg)", plan.rm.bw || ""]);
+  calcData.push(["Peso corporeo (kg)", rm.bw || ""]);
   calcData.push([]);
   
   const calcHeader = ["Alzata", "1RM (kg)", ...PCTS.map(p => `${p}%`)];
   calcData.push(calcHeader);
 
-  const bw = num(plan.rm.bw);
+  const bw = num(rm.bw);
   LIFTS.forEach(([k, name, bwBased]) => {
-    const one = num(plan.rm.lifts[k]);
-    const row = [name, plan.rm.lifts[k] || ""];
+    const one = num(rm.lifts[k]);
+    const row = [name, rm.lifts[k] || ""];
     PCTS.forEach((p) => {
       if (isNaN(one) || (bwBased && isNaN(bw))) {
         row.push("");
@@ -423,20 +429,20 @@ function exportToExcel() {
 
   const libHeaders = GROUPS;
   const libRows = [libHeaders];
-  const maxLen = Math.max(...GROUPS.map(g => (plan.library[g] || []).length), 1);
+  const maxLen = Math.max(...GROUPS.map(g => (lib[g] || []).length), 1);
   for (let i = 0; i < maxLen; i++) {
-    const row = GROUPS.map(g => (plan.library[g] || [])[i] || "");
+    const row = GROUPS.map(g => (lib[g] || [])[i] || "");
     libRows.push(row);
   }
   const wsLib = XLSX.utils.aoa_to_sheet(libRows);
   XLSX.utils.book_append_sheet(wb, wsLib, "Libreria Esercizi");
 
-  const fileName = `Scheda_Modulare_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  const fileName = meta.fileName || `Scheda_Modulare_${new Date().toISOString().slice(0, 10)}.xlsx`;
   XLSX.writeFile(wb, fileName);
   toast("File Excel esportato con successo!");
 }
 
-async function parseAndImportExcel(file) {
+async function parseAndImportExcel(file, scheduleOn = null) {
   if (typeof XLSX === "undefined") return toast("Libreria XLSX in caricamento...");
   try {
     const data = new Uint8Array(await file.arrayBuffer());
@@ -593,6 +599,13 @@ async function parseAndImportExcel(file) {
       createdAt: Date.now()
     });
 
+    if (scheduleOn) {                                     // programmata: la scheda attuale non viene toccata
+      await saveScheduled(newPlanData, scheduleOn, unknownGroups.size
+        ? " Gruppi non riconosciuti messi in Petto: " + [...unknownGroups].join(", ") : "");
+      return;
+    }
+    await archiveCurrent("sostituita da importazione Excel");
+    newPlanData.planId = newId();
     plan = newPlanData;
     await setDoc(ref, clone(newPlanData));
     hist.undo = []; hist.redo = []; hist.typing = null;
@@ -660,29 +673,234 @@ async function resolveUser(input) {
   return p.exists() ? { uid: raw } : null;
 }
 
+/* ---------- schede programmate e archivio ---------- */
+const todayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const fmtDate = (s) => { const m = String(s || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ""; };
+const parseDate = (v) => {
+  const m = String(v).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  return m ? `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}` : "";
+};
+const slug = (s) => String(s || "scheda").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "scheda";
+let extras = { sched: [], arch: [] };
+let scheduleDate = null, checkedFor = null, held = null, checking = false;
+
+// salva la scheda attuale (con kg e massimali) nell'archivio
+async function archiveCurrent(reason) {
+  if (!plan || !activeUid) return;
+  await setDoc(doc(db, "users", activeUid, "archive", Date.now().toString(36)), clone({
+    title: plan.title, weeks: plan.weeks, days: plan.days, kg: plan.kg, rm: plan.rm,
+    startDate: plan.startDate || "", endDate: todayStr(), reason
+  }));
+}
+
+// salva una scheda da attivare in futuro: NON tocca la scheda attuale
+async function saveScheduled(p, date, note = "") {
+  if (date <= todayStr()) throw new Error("la data deve essere successiva a oggi");
+  await setDoc(doc(db, "users", activeUid, "scheduled", Date.now().toString(36)),
+    clone({ title: p.title, weeks: p.weeks, days: p.days, startDate: date }));
+  toast(`Scheda "${p.title}" programmata per il ${fmtDate(date)}.${note}`);
+  await loadExtras();
+}
+
+// scambio atomico: archivia l'attuale, attiva la programmata, elimina la programmata usata.
+// Le programmate "saltate" (superate da una piu' recente) vanno prima in archivio, fuori dalla transazione:
+// cosi' la transazione resta di sole 3 scritture (le regole limitano gli accessi per richiesta).
+async function activateScheduled(uid, target, skipped = [], since = target.startDate) {
+  const stamp0 = Date.now().toString(36);
+  for (const [i, s] of skipped.entries()) {
+    await setDoc(doc(db, "users", uid, "archive", `${stamp0}s${i}`), clone({
+      title: s.title ?? "", weeks: s.weeks ?? 5, days: s.days ?? [], kg: {}, rm: {}, startDate: s.startDate ?? "",
+      endDate: s.startDate ?? "", reason: "programmata ma mai attivata (superata da una piu' recente)"
+    }));
+    await deleteDoc(doc(db, "users", uid, "scheduled", s.id));
+  }
+  const mainRef = doc(db, "users", uid, "plan", "main");
+  const tRef = doc(db, "users", uid, "scheduled", target.id);
+  const done = await runTransaction(db, async (tx) => {
+    const [mSnap, tSnap] = await Promise.all([tx.get(mainRef), tx.get(tRef)]);
+    if (!tSnap.exists()) return false;                    // gia' attivata da un altro dispositivo
+    const cur = mSnap.exists() ? mSnap.data() : null, next = tSnap.data();
+    const stamp = Date.now().toString(36);
+    if (cur) tx.set(doc(db, "users", uid, "archive", stamp), clone({
+      title: cur.title ?? "", weeks: cur.weeks ?? 5, days: cur.days ?? [], kg: cur.kg ?? {}, rm: cur.rm ?? {},
+      startDate: cur.startDate ?? "", endDate: since, reason: "sostituita da scheda programmata"
+    }));
+    const fresh = normalize({ title: next.title, weeks: next.weeks, days: clone(next.days || []),
+      library: clone(cur?.library ?? SEED_LIBRARY), rm: clone(cur?.rm ?? {}), kg: {} });
+    tx.set(mainRef, {
+      ...clone({ title: fresh.title, weeks: fresh.weeks, days: fresh.days, library: fresh.library, rm: fresh.rm, kg: {} }),
+      startDate: since, planId: stamp, createdAt: cur?.createdAt ?? Date.now()
+    });
+    tx.delete(tRef);
+    return true;
+  });
+  if (done && uid === activeUid) toast(`Da oggi e' attiva la scheda "${target.title}".`);
+  return done;
+}
+
+// all'apertura di una scheda: se una programmata ha raggiunto la data, attivala (ritorna true se ha scambiato)
+async function checkScheduled(uid) {
+  if (checkedFor === uid) return false;
+  checkedFor = uid;
+  try {
+    const snap = await getDocs(query(collection(db, "users", uid, "scheduled"), where("startDate", "<=", todayStr())));
+    if (snap.empty) return false;
+    const due = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => String(a.startDate).localeCompare(String(b.startDate)));
+    return await activateScheduled(uid, due.at(-1), due.slice(0, -1));
+  } catch (e) { console.warn("schede programmate:", e.code || e); return false; }
+}
+
+async function loadExtras() {
+  const uid = activeUid; if (!uid) return;
+  try {
+    const [s, a] = await Promise.all([getDocs(collection(db, "users", uid, "scheduled")),
+                                      getDocs(collection(db, "users", uid, "archive"))]);
+    if (uid !== activeUid) return;
+    extras.sched = s.docs.map((d) => ({ id: d.id, ...d.data() }))
+      .sort((x, y) => String(x.startDate).localeCompare(String(y.startDate)));
+    extras.arch = a.docs.map((d) => ({ id: d.id, ...d.data() })).sort((x, y) => y.id.localeCompare(x.id));
+  } catch (e) { console.warn("extras:", e.code || e); extras = { sched: [], arch: [] }; }
+  fillExtras();
+}
+
+function fillExtras() {
+  const box = $("#extras"); if (!box) return;
+  const admin = isAdminUser();
+  const sched = extras.sched.map((s) => `<div class="card"><div class="top"><span class="badge">Dal ${esc(fmtDate(s.startDate))}</span>
+    <span>${esc(s.weeks)} sett.</span></div><div class="ex">${esc(s.title)}</div>
+    <div class="erow"><button data-a="pv-open" data-k="sched" data-id="${esc(s.id)}">Anteprima</button>
+    ${admin ? `<button data-a="sched-date" data-id="${esc(s.id)}">Cambia data</button>
+    <button data-a="sched-now" data-id="${esc(s.id)}">Attiva ora</button>
+    <button class="danger" data-a="sched-del" data-id="${esc(s.id)}">Elimina</button>` : ""}</div></div>`).join("");
+  const arch = extras.arch.map((a) => `<div class="card"><div class="top">
+    <span class="badge">${esc(fmtDate(a.startDate) || "?")} &rarr; ${esc(fmtDate(a.endDate) || "?")}</span><span>${esc(a.weeks ?? "")} sett.</span></div>
+    <div class="ex">${esc(a.title)}</div><div class="hint" style="text-align:left">${esc(a.reason || "")}</div>
+    <div class="erow"><button data-a="pv-open" data-k="arch" data-id="${esc(a.id)}">Apri</button>
+    <button data-a="arch-xlsx" data-id="${esc(a.id)}">Scarica Excel</button>
+    <button data-a="arch-json" data-id="${esc(a.id)}">Scarica JSON</button>
+    ${admin ? `<button class="danger" data-a="arch-del" data-id="${esc(a.id)}">Elimina</button>` : ""}</div></div>`).join("");
+  box.innerHTML = `<div class="sec">Schede programmate</div>
+    ${admin ? `<div class="erow"><label>Attiva dal
+      <input type="date" id="schedDate" min="${todayStr()}" style="font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line,#444);background:var(--card,#222);color:inherit;color-scheme:dark"></label>
+      <button class="btn" data-a="sched-new">Carica scheda da programmare</button></div>
+      <p class="note">La scheda attuale resta attiva e viene archiviata (con i kg) quando arriva la data.</p>` : ""}
+    ${sched || `<p class="note">Nessuna scheda programmata.</p>`}
+    <div class="sec">Archivio schede</div>
+    ${arch || `<p class="note">L'archivio e' vuoto: le schede sostituite compaiono qui con i loro kg.</p>`}`;
+}
+
+async function schedAction(a, t) {
+  const find = (list) => list.find((x) => x.id === t.dataset.id);
+  try {
+    if (a === "sched-new") {
+      const when = $("#schedDate")?.value || "";
+      if (!when) return toast("Scegli prima la data di attivazione.");
+      if (when <= todayStr()) return toast("La data deve essere successiva a oggi.");
+      scheduleDate = when; $("#importFile").click(); return;
+    }
+    if (a === "sched-date") {
+      const s = find(extras.sched); if (!s) return;
+      const iso = parseDate(prompt("Nuova data di attivazione (GG/MM/AAAA):", fmtDate(s.startDate)) || "");
+      if (!iso) return toast("Data non valida.");
+      if (iso <= todayStr()) return toast("La data deve essere successiva a oggi.");
+      await updateDoc(doc(db, "users", activeUid, "scheduled", s.id), { startDate: iso });
+    } else if (a === "sched-now") {
+      const s = find(extras.sched); if (!s) return;
+      if (!confirm(`Attivare subito "${s.title}"? La scheda attuale verra' archiviata con i suoi kg.`)) return;
+      await activateScheduled(activeUid, s, [], todayStr());
+    } else if (a === "sched-del") {
+      const s = find(extras.sched); if (!s || !confirm(`Eliminare la scheda programmata "${s.title}"?`)) return;
+      await deleteDoc(doc(db, "users", activeUid, "scheduled", s.id));
+    } else if (a === "arch-xlsx") {
+      const x = find(extras.arch); if (!x) return;
+      exportToExcel(x, { fileName: `Scheda_${slug(x.title)}_${x.startDate || "inizio"}_${x.endDate || "fine"}.xlsx`,
+        when: `dal ${fmtDate(x.startDate) || "?"} al ${fmtDate(x.endDate) || "?"}` });
+      return;
+    } else if (a === "arch-json") {
+      const x = find(extras.arch); if (!x) return;
+      const { id, ...data } = x; download(`archivio-${id}.json`, JSON.stringify(data, null, 1)); return;
+    } else if (a === "arch-del") {
+      const x = find(extras.arch); if (!x || !confirm(`Eliminare definitivamente "${x.title}" dall'archivio?`)) return;
+      await deleteDoc(doc(db, "users", activeUid, "archive", x.id));
+    }
+  } catch (e) { onErr(e); }
+  await loadExtras();
+}
+
+// vista in sola lettura di una scheda archiviata o programmata
+function viewPreview() {
+  const { k, id } = ui.preview;
+  const a = (k === "sched" ? extras.sched : extras.arch).find((x) => x.id === id);
+  const back = `<div class="bar"><button class="chip" data-a="pv-close">&larr; Indietro</button>
+    <span class="sm">${k === "sched" ? "Anteprima" : "Archivio"} - sola lettura</span>
+    ${k === "arch" ? `<button class="chip" data-a="arch-xlsx" data-id="${esc(id)}">Scarica Excel</button>` : ""}</div>`;
+  if (!a) return back + `<p class="note">Elemento non trovato.</p>`;
+  const kg = a.kg || {}, weeks = a.weeks || 5;
+  const kgText = (r, w) => {
+    const ser = seriesOf(r.scheme?.[w]);
+    const vals = ser ? ser.map((_, si) => kg[kgKey(r.id, w, si)] || "") : [kg[kgKey(r.id, w, 0)] || ""];
+    return vals.some(Boolean) ? vals.map((v) => v || "-").join("/") + " kg" : "";
+  };
+  const line = "display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-top:1px solid var(--line,#444);font-size:15px";
+  return back + `<div class="card"><div class="ex">${esc(a.title)}</div>
+    <div class="hint" style="text-align:left">${esc(fmtDate(a.startDate) || "?")} &rarr; ${esc(fmtDate(a.endDate) || (k === "sched" ? "" : "?"))}
+    ${k === "sched" ? " (da attivare)" : ""}</div></div>` +
+    (a.days || []).map((d) => `<div class="sec">${esc(d.name)}</div>` + (d.rows || []).map((r) =>
+      `<div class="card"><div class="top"><span class="badge" data-g="${esc(r.group)}">${esc(r.group)}</span>
+      <span>&#9201; ${esc(r.rest || "-")}</span></div><div class="ex">${esc(r.ex)}</div>
+      ${Array.from({ length: weeks }, (_, w) => `<div style="${line}"><span>S${w + 1}</span>
+        <span>${esc(r.scheme?.[w] || "-")}</span><b>${esc(kgText(r, w))}</b></div>`).join("")}</div>`).join("")).join("");
+}
+
 async function listenToUid(uid) {
   flushSaves();                                   // salva sul vecchio riferimento prima di cambiare
   if (unsub) { unsub(); unsub = null; }
-  plan = null; rendered = false;
+  plan = null; rendered = false; held = null; checking = false;
   hist.undo = []; hist.redo = []; hist.typing = null;
-  activeUid = uid;
+  activeUid = uid; ui.preview = null;
   ref = doc(db, "users", uid, "plan", "main");
   showMsg("<p>Caricamento scheda in corso...</p>");
-  unsub = onSnapshot(ref, (snap) => {
-    if (!snap.exists()) {
-      if (snap.metadata.fromCache) showMsg("<p>Connessione in corso...</p>"); else showOnboarding();
-      return;
-    }
+
+  const apply = (snap) => {
     if (rendered) {
       if (snap.metadata.hasPendingWrites || timers.size) return;
       const a = document.activeElement;
       if (a && view.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return;
     }
+    const prevPid = plan?.planId;
     normChanged = false;
     plan = normalize(snap.data());
     if (!rendered) restoreUi();
+    else if (prevPid !== plan.planId) {            // la scheda e' stata sostituita: stesso tab, ma riparti da Giorno 1 / S1
+      ui.day = 0; ui.week = 0; ui.edit = false; ui.preview = null; saveUi();
+    }
     if (normChanged && activeUid === user?.uid) { normChanged = false; saveStruct(); }
     render();
+  };
+
+  unsub = onSnapshot(ref, (snap) => {
+    if (uid !== activeUid) return;
+    if (!snap.exists()) {
+      if (snap.metadata.fromCache) showMsg("<p>Connessione in corso...</p>"); else showOnboarding();
+      return;
+    }
+    if (!rendered && (checkedFor !== uid || checking)) {   // prima di mostrare la scheda: e' scaduta una programmata?
+      held = snap;
+      if (!checking) {
+        checking = true;
+        Promise.race([checkScheduled(uid), new Promise((r) => setTimeout(() => r(false), 4000))]).then(() => {
+          checking = false;
+          if (held && uid === activeUid && !rendered) apply(held);
+          held = null;
+        });
+      }
+      return;
+    }
+    apply(snap);
   }, (err) => {
     console.error("Firestore Error:", err);
     showMsg(`<h1>Accesso fallito</h1><p>${err.code === "permission-denied"
@@ -732,7 +950,12 @@ async function handleAction(a, t) {
         await setDoc(ref, clone(newPlan));
         render();
       } catch (e) { onErr(e); } return;
-    case "tab": ui.tab = t.dataset.t; saveUi(); break;
+    case "tab": ui.tab = t.dataset.t; ui.preview = null; saveUi(); if (ui.tab === "opz") loadExtras(); break;
+    case "pv-open": ui.preview = { k: t.dataset.k, id: t.dataset.id }; break;
+    case "pv-close": ui.preview = null; break;
+    case "sched-new": case "sched-date": case "sched-now": case "sched-del":
+    case "arch-xlsx": case "arch-json": case "arch-del":
+      await schedAction(a, t); return;
     case "day": ui.day = +t.dataset.i; saveUi(); break;
     case "week": ui.week = +t.dataset.i; saveUi(); break;
     case "edit": ui.edit = !ui.edit; break;
@@ -767,7 +990,8 @@ async function handleAction(a, t) {
         library: plan.library, rm: plan.rm, kg: plan.kg }), null, 1)); return;
     case "import-file": $("#importFile").click(); return;
     case "clear-kg":
-      if (!confirm("Azzerare TUTTI i kg segnati?")) return;
+      if (!confirm("Azzerare TUTTI i kg segnati? (la scheda attuale con i suoi kg viene prima archiviata)")) return;
+      await archiveCurrent("kg azzerati (nuovo blocco)");
       Object.keys(plan.kg).forEach((k) => save({ ["kg." + k]: deleteField() })); plan.kg = {}; break;
     default: return;
   }
@@ -816,29 +1040,35 @@ view.addEventListener("change", onChange);
 view.addEventListener("focusout", () => { hist.typing = null; });
 
 $("#importFile").addEventListener("change", async (e) => {
-  const file = e.target.files[0]; e.target.value = ""; if (!file) return;
-  const fileName = file.name.toLowerCase();
-  
-  if (fileName.endsWith(".xlsx") || fileName.endsWith(".xlsm") || fileName.endsWith(".xls")) {
-    if (!confirm(`Importare la scheda, i carichi ed il Calcolatore dal file Excel "${file.name}" per l'utente attivo?`)) return;
-    await parseAndImportExcel(file);
-  } else if (fileName.endsWith(".json")) {
-    try {
+  const file = e.target.files[0]; e.target.value = "";
+  const when = scheduleDate; scheduleDate = null;          // data scelta con "Carica scheda da programmare"
+  if (!file) return;
+  const name = file.name.toLowerCase(), isXls = /\.(xlsx|xlsm|xls)$/.test(name);
+  try {
+    if (when) {                                             // programma per il futuro: l'attuale non viene toccata
+      if (!confirm(`Programmare "${file.name}" per il ${fmtDate(when)}?\nLa scheda attuale resta attiva fino ad allora.`)) return;
+      if (isXls) await parseAndImportExcel(file, when);
+      else if (name.endsWith(".json")) {
+        const data = JSON.parse(await file.text());
+        if (!Array.isArray(data.days)) throw new Error("file non valido (manca 'days')");
+        await saveScheduled(normalize({ ...data }), when);
+      } else throw new Error("formato non supportato (usa .xlsx, .xlsm o .json)");
+      return;
+    }
+    if (isXls) {
+      if (!confirm(`Importare la scheda, i carichi ed il Calcolatore dal file Excel "${file.name}" per l'utente attivo?\nLa scheda attuale verra' archiviata con i suoi kg.`)) return;
+      await parseAndImportExcel(file);
+    } else if (name.endsWith(".json")) {
       const data = JSON.parse(await file.text());
       if (!Array.isArray(data.days)) throw new Error("file non valido (manca 'days')");
-      if (!confirm("Sostituire la scheda attuale con quella del file JSON?")) return;
-      const p = normalize({ ...data, createdAt: Date.now() });
-      await setDoc(ref, clone(p));
-      hist.undo = []; hist.redo = []; hist.typing = null;
-      ui.day = 0; ui.week = 0;
-      render();
-      toast("Backup JSON importato con successo!");
-    } catch (err) {
-      toast("Importazione JSON non riuscita: " + err.message);
-    }
-  } else {
-    toast("Formato file non supportato. Seleziona un file Excel (.xlsx/.xlsm) o JSON.");
-  }
+      if (!confirm("Sostituire la scheda attuale con quella del file JSON?\nLa scheda attuale verra' archiviata con i suoi kg.")) return;
+      await archiveCurrent("sostituita da importazione JSON");
+      const p = normalize({ ...data, createdAt: Date.now() }); p.planId = newId();
+      plan = p; await setDoc(ref, clone(p));
+      hist.undo = []; hist.redo = []; hist.typing = null; ui.day = 0; ui.week = 0;
+      render(); toast("Backup JSON importato con successo!");
+    } else toast("Formato file non supportato. Seleziona un file Excel (.xlsx/.xlsm) o JSON.");
+  } catch (err) { toast("Importazione non riuscita: " + err.message); }
 });
 
 /* ---------- autenticazione e sync ---------- */
@@ -848,7 +1078,7 @@ onAuthStateChanged(auth, async (u) => {
   if (!u) {
     if (unsub) { unsub(); unsub = null; }
     timers.forEach(({ id }) => clearTimeout(id)); timers.clear();
-    ref = null; activeUid = null; dirCache = [];
+    ref = null; activeUid = null; dirCache = []; checkedFor = null; held = null; checking = false;
     showLogin(); return;
   }
   showMsg("<p>Verifica account in corso...</p>");
