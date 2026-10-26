@@ -683,6 +683,7 @@ const parseDate = (v) => {
   const m = String(v).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   return m ? `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}` : "";
 };
+const dateKey = (iso) => Number(String(iso).replace(/-/g, ""));   // 2026-11-02 -> 20261102 (usato dalle regole)
 const slug = (s) => String(s || "scheda").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "scheda";
 let extras = { sched: [], arch: [] };
 let scheduleDate = null, checkedFor = null, held = null, checking = false;
@@ -692,7 +693,7 @@ async function archiveCurrent(reason) {
   if (!plan || !activeUid) return;
   await setDoc(doc(db, "users", activeUid, "archive", Date.now().toString(36)), clone({
     title: plan.title, weeks: plan.weeks, days: plan.days, kg: plan.kg, rm: plan.rm,
-    startDate: plan.startDate || "", endDate: todayStr(), reason
+    startDate: plan.startDate || "", endDate: todayStr(), reason, supersedes: plan.restoredFrom ?? null
   }));
 }
 
@@ -700,7 +701,7 @@ async function archiveCurrent(reason) {
 async function saveScheduled(p, date, note = "") {
   if (date <= todayStr()) throw new Error("la data deve essere successiva a oggi");
   await setDoc(doc(db, "users", activeUid, "scheduled", Date.now().toString(36)),
-    clone({ title: p.title, weeks: p.weeks, days: p.days, startDate: date }));
+    clone({ title: p.title, weeks: p.weeks, days: p.days, startDate: date, startKey: dateKey(date) }));
   toast(`Scheda "${p.title}" programmata per il ${fmtDate(date)}.${note}`);
   await loadExtras();
 }
@@ -726,7 +727,8 @@ async function activateScheduled(uid, target, skipped = [], since = target.start
     const stamp = Date.now().toString(36);
     if (cur) tx.set(doc(db, "users", uid, "archive", stamp), clone({
       title: cur.title ?? "", weeks: cur.weeks ?? 5, days: cur.days ?? [], kg: cur.kg ?? {}, rm: cur.rm ?? {},
-      startDate: cur.startDate ?? "", endDate: since, reason: "sostituita da scheda programmata"
+      startDate: cur.startDate ?? "", endDate: since, reason: "sostituita da scheda programmata",
+      supersedes: cur.restoredFrom ?? null
     }));
     const fresh = normalize({ title: next.title, weeks: next.weeks, days: clone(next.days || []),
       library: clone(cur?.library ?? SEED_LIBRARY), rm: clone(cur?.rm ?? {}), kg: {} });
@@ -738,6 +740,33 @@ async function activateScheduled(uid, target, skipped = [], since = target.start
     return true;
   });
   if (done && uid === activeUid) toast(`Da oggi e' attiva la scheda "${target.title}".`);
+  return done;
+}
+
+// riattiva una scheda dall'archivio (con i suoi kg): l'attuale va in archivio, quindi si puo' tornare indietro e avanti.
+// Non si cancella nulla: la voce usata resta, ma viene nascosta finche' la scheda ripristinata e' quella attiva.
+async function restoreArchived(uid, entry) {
+  const mainRef = doc(db, "users", uid, "plan", "main");
+  const aRef = doc(db, "users", uid, "archive", entry.id);
+  const stamp = Date.now().toString(36);
+  const done = await runTransaction(db, async (tx) => {
+    const [mSnap, aSnap] = await Promise.all([tx.get(mainRef), tx.get(aRef)]);
+    if (!aSnap.exists()) return false;
+    const cur = mSnap.exists() ? mSnap.data() : null, old = aSnap.data();
+    if (cur) tx.set(doc(db, "users", uid, "archive", stamp), clone({
+      title: cur.title ?? "", weeks: cur.weeks ?? 5, days: cur.days ?? [], kg: cur.kg ?? {}, rm: cur.rm ?? {},
+      startDate: cur.startDate ?? "", endDate: todayStr(), reason: `sostituita dal ripristino di "${old.title ?? ""}"`,
+      supersedes: cur.restoredFrom ?? null
+    }));
+    const fresh = normalize({ title: old.title, weeks: old.weeks, days: clone(old.days || []),
+      library: clone(cur?.library ?? SEED_LIBRARY), rm: clone(cur?.rm ?? {}), kg: clone(old.kg || {}) });   // massimali: restano quelli attuali
+    tx.set(mainRef, {
+      ...clone({ title: fresh.title, weeks: fresh.weeks, days: fresh.days, library: fresh.library, rm: fresh.rm, kg: fresh.kg }),
+      startDate: old.startDate ?? "", planId: stamp, restoredFrom: entry.id, createdAt: cur?.createdAt ?? Date.now()
+    });
+    return true;
+  });
+  if (done && uid === activeUid) toast(`Riattivata la scheda "${entry.title}".`);
   return done;
 }
 
@@ -770,26 +799,31 @@ async function loadExtras() {
 function fillExtras() {
   const box = $("#extras"); if (!box) return;
   const admin = isAdminUser();
+  // voci nascoste: quella da cui deriva la scheda attiva e quelle superate da un archivio piu' recente
+  const shown = extras.arch.filter((a) => a.id !== plan?.restoredFrom && !extras.arch.some((x) => x.supersedes === a.id));
   const sched = extras.sched.map((s) => `<div class="card"><div class="top"><span class="badge">Dal ${esc(fmtDate(s.startDate))}</span>
     <span>${esc(s.weeks)} sett.</span></div><div class="ex">${esc(s.title)}</div>
     <div class="erow"><button data-a="pv-open" data-k="sched" data-id="${esc(s.id)}">Anteprima</button>
     ${admin ? `<button data-a="sched-date" data-id="${esc(s.id)}">Cambia data</button>
     <button data-a="sched-now" data-id="${esc(s.id)}">Attiva ora</button>
     <button class="danger" data-a="sched-del" data-id="${esc(s.id)}">Elimina</button>` : ""}</div></div>`).join("");
-  const arch = extras.arch.map((a) => `<div class="card"><div class="top">
+  const arch = shown.map((a) => `<div class="card"><div class="top">
     <span class="badge">${esc(fmtDate(a.startDate) || "?")} &rarr; ${esc(fmtDate(a.endDate) || "?")}</span><span>${esc(a.weeks ?? "")} sett.</span></div>
     <div class="ex">${esc(a.title)}</div><div class="hint" style="text-align:left">${esc(a.reason || "")}</div>
     <div class="erow"><button data-a="pv-open" data-k="arch" data-id="${esc(a.id)}">Apri</button>
+    <button data-a="arch-restore" data-id="${esc(a.id)}">Ripristina</button>
     <button data-a="arch-xlsx" data-id="${esc(a.id)}">Scarica Excel</button>
     <button data-a="arch-json" data-id="${esc(a.id)}">Scarica JSON</button>
     ${admin ? `<button class="danger" data-a="arch-del" data-id="${esc(a.id)}">Elimina</button>` : ""}</div></div>`).join("");
   box.innerHTML = `<div class="sec">Schede programmate</div>
     ${admin ? `<div class="erow"><label>Attiva dal
-      <input type="date" id="schedDate" min="${todayStr()}" style="font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line,#444);background:var(--card,#222);color:inherit;color-scheme:dark"></label>
-      <button class="btn" data-a="sched-new">Carica scheda da programmare</button></div>
-      <p class="note">La scheda attuale resta attiva e viene archiviata (con i kg) quando arriva la data.</p>` : ""}
+        <input type="date" id="schedDate" min="${todayStr()}" style="font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line,#444);background:var(--card,#222);color:inherit;color-scheme:dark"></label>
+        <button class="btn" data-a="sched-new">Carica scheda da programmare</button></div>
+      <p class="note">La scheda attuale resta attiva e viene archiviata (con i kg) quando arriva la data.</p>`
+      : `<p class="note">Alla data indicata la scheda attuale va in archivio con i suoi kg e questa diventa quella attiva.</p>`}
     ${sched || `<p class="note">Nessuna scheda programmata.</p>`}
     <div class="sec">Archivio schede</div>
+    <p class="note">"Ripristina" riattiva una scheda vecchia con i suoi kg. Quella attuale va in archivio con i suoi kg, e puoi tornarci quando vuoi.</p>
     ${arch || `<p class="note">L'archivio e' vuoto: le schede sostituite compaiono qui con i loro kg.</p>`}`;
 }
 
@@ -807,7 +841,7 @@ async function schedAction(a, t) {
       const iso = parseDate(prompt("Nuova data di attivazione (GG/MM/AAAA):", fmtDate(s.startDate)) || "");
       if (!iso) return toast("Data non valida.");
       if (iso <= todayStr()) return toast("La data deve essere successiva a oggi.");
-      await updateDoc(doc(db, "users", activeUid, "scheduled", s.id), { startDate: iso });
+      await updateDoc(doc(db, "users", activeUid, "scheduled", s.id), { startDate: iso, startKey: dateKey(iso) });
     } else if (a === "sched-now") {
       const s = find(extras.sched); if (!s) return;
       if (!confirm(`Attivare subito "${s.title}"? La scheda attuale verra' archiviata con i suoi kg.`)) return;
@@ -815,6 +849,11 @@ async function schedAction(a, t) {
     } else if (a === "sched-del") {
       const s = find(extras.sched); if (!s || !confirm(`Eliminare la scheda programmata "${s.title}"?`)) return;
       await deleteDoc(doc(db, "users", activeUid, "scheduled", s.id));
+    } else if (a === "arch-restore") {
+      const x = find(extras.arch); if (!x) return;
+      if (!confirm(`Riattivare "${x.title}" con i suoi kg?\nLa scheda attuale "${plan?.title || ""}" verra' archiviata con i suoi kg e potrai tornarci.`)) return;
+      flushSaves();
+      await restoreArchived(activeUid, x);
     } else if (a === "arch-xlsx") {
       const x = find(extras.arch); if (!x) return;
       exportToExcel(x, { fileName: `Scheda_${slug(x.title)}_${x.startDate || "inizio"}_${x.endDate || "fine"}.xlsx`,
@@ -837,7 +876,8 @@ function viewPreview() {
   const a = (k === "sched" ? extras.sched : extras.arch).find((x) => x.id === id);
   const back = `<div class="bar"><button class="chip" data-a="pv-close">&larr; Indietro</button>
     <span class="sm">${k === "sched" ? "Anteprima" : "Archivio"} - sola lettura</span>
-    ${k === "arch" ? `<button class="chip" data-a="arch-xlsx" data-id="${esc(id)}">Scarica Excel</button>` : ""}</div>`;
+    ${k === "arch" ? `<button class="chip" data-a="arch-restore" data-id="${esc(id)}">Ripristina</button>
+    <button class="chip" data-a="arch-xlsx" data-id="${esc(id)}">Scarica Excel</button>` : ""}</div>`;
   if (!a) return back + `<p class="note">Elemento non trovato.</p>`;
   const kg = a.kg || {}, weeks = a.weeks || 5;
   const kgText = (r, w) => {
@@ -954,7 +994,7 @@ async function handleAction(a, t) {
     case "pv-open": ui.preview = { k: t.dataset.k, id: t.dataset.id }; break;
     case "pv-close": ui.preview = null; break;
     case "sched-new": case "sched-date": case "sched-now": case "sched-del":
-    case "arch-xlsx": case "arch-json": case "arch-del":
+    case "arch-restore": case "arch-xlsx": case "arch-json": case "arch-del":
       await schedAction(a, t); return;
     case "day": ui.day = +t.dataset.i; saveUi(); break;
     case "week": ui.week = +t.dataset.i; saveUi(); break;
