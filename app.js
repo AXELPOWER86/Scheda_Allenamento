@@ -228,7 +228,7 @@ function render() {
     .map(([t, l]) => `<button data-a="tab" data-t="${t}" class="${ui.tab === t ? "on" : ""}">${l}</button>`).join("");
   view.innerHTML = ui.preview ? viewPreview() : (ui.tab === "scheda" ? viewScheda() : ui.tab === "calc" ? viewCalc() : viewOpz());
   if (ui.tab === "calc") updateCalc();
-  if (ui.tab === "opz" && !ui.preview) { fillDirList(); fillExtras(); }
+  if (ui.tab === "opz" && !ui.preview) { fillDirList(); fillExtras(); if (extrasFor !== activeUid) loadExtras(); }
 }
 
 /* --- scheda --- */
@@ -685,7 +685,7 @@ const parseDate = (v) => {
 };
 const dateKey = (iso) => Number(String(iso).replace(/-/g, ""));   // 2026-11-02 -> 20261102 (usato dalle regole)
 const slug = (s) => String(s || "scheda").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "scheda";
-let extras = { sched: [], arch: [] };
+let extras = { sched: [], arch: [] }, extrasFor = null;   // extrasFor = uid per cui l'elenco e' caricato
 let scheduleDate = null, checkedFor = null, held = null, checking = false;
 
 // salva la scheda attuale (con kg e massimali) nell'archivio
@@ -695,6 +695,7 @@ async function archiveCurrent(reason) {
     title: plan.title, weeks: plan.weeks, days: plan.days, kg: plan.kg, rm: plan.rm,
     startDate: plan.startDate || "", endDate: todayStr(), reason, supersedes: plan.restoredFrom ?? null
   }));
+  extrasFor = null;                                       // l'elenco dell'archivio va ricaricato
 }
 
 // salva una scheda da attivare in futuro: NON tocca la scheda attuale
@@ -785,6 +786,7 @@ async function checkScheduled(uid) {
 
 async function loadExtras() {
   const uid = activeUid; if (!uid) return;
+  extrasFor = uid;
   try {
     const [s, a] = await Promise.all([getDocs(collection(db, "users", uid, "scheduled")),
                                       getDocs(collection(db, "users", uid, "archive"))]);
@@ -792,7 +794,7 @@ async function loadExtras() {
     extras.sched = s.docs.map((d) => ({ id: d.id, ...d.data() }))
       .sort((x, y) => String(x.startDate).localeCompare(String(y.startDate)));
     extras.arch = a.docs.map((d) => ({ id: d.id, ...d.data() })).sort((x, y) => y.id.localeCompare(x.id));
-  } catch (e) { console.warn("extras:", e.code || e); extras = { sched: [], arch: [] }; }
+  } catch (e) { console.warn("extras:", e.code || e); extras = { sched: [], arch: [] }; extrasFor = null; }
   fillExtras();
 }
 
@@ -900,6 +902,7 @@ async function listenToUid(uid) {
   flushSaves();                                   // salva sul vecchio riferimento prima di cambiare
   if (unsub) { unsub(); unsub = null; }
   plan = null; rendered = false; held = null; checking = false;
+  extras = { sched: [], arch: [] }; extrasFor = null;
   hist.undo = []; hist.redo = []; hist.typing = null;
   activeUid = uid; ui.preview = null;
   ref = doc(db, "users", uid, "plan", "main");
@@ -916,7 +919,7 @@ async function listenToUid(uid) {
     plan = normalize(snap.data());
     if (!rendered) restoreUi();
     else if (prevPid !== plan.planId) {            // la scheda e' stata sostituita: stesso tab, ma riparti da Giorno 1 / S1
-      ui.day = 0; ui.week = 0; ui.edit = false; ui.preview = null; saveUi();
+      ui.day = 0; ui.week = 0; ui.edit = false; ui.preview = null; extrasFor = null; saveUi();
     }
     if (normChanged && activeUid === user?.uid) { normChanged = false; saveStruct(); }
     render();
