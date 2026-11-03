@@ -3,7 +3,7 @@ import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChang
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
          doc, getDoc, setDoc, updateDoc, deleteField, onSnapshot,
-         collection, query, where, limit, getDocs, serverTimestamp, runTransaction, deleteDoc }
+         collection, query, where, limit, getDocs, serverTimestamp, runTransaction, deleteDoc, waitForPendingWrites }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 import { SEED_DAYS, SEED_LIBRARY } from "./seed.js";
@@ -13,7 +13,7 @@ const ADMIN_EMAIL = "kataxsecret@gmail.com";
 const GROUPS = ["Petto", "Dorso", "Spalle", "Bicipiti", "Tricipiti", "Gambe", "Core"];
 const LIFTS = [
   ["squat", "Squat", false], ["panca", "Panca piana", false], ["stacco", "Stacco", false],
-  ["military", "Military Press", false], ["pullup", "Pull Up", true], ["dips", "Dips", true]
+  ["military", "Military Press", false], ["pullup", "Pull Up", true], ["chinup", "Chin Up", true], ["dips", "Dips", true]
 ];
 const PCTS = []; for (let p = 35; p <= 100; p += 5) PCTS.push(p);
 
@@ -66,6 +66,58 @@ function seriesOf(scheme) {
   return p.length > 1 ? p : null;
 }
 const kgKey = (id, w, s) => (s ? `${id}_${w}_${s}` : `${id}_${w}`);
+
+/* ---------- carichi automatici da % (dal Calcolatore) ---------- */
+// Il nome dell'esercizio viene riconosciuto per parola (es. "Stacco sumo" -> Stacco, "Chin up + ISO" -> Chin Up).
+// Conta solo se lo schema contiene un % (es. "3x8 @60%"): e' il segnale che il carico va calcolato.
+const LIFT_RULES = [
+  ["chinup", /\bchin up\b/], ["pullup", /\b(pull up|pullup|trazioni)\b/], ["dips", /\bdips\b/], ["military", /\bmilitary\b/],
+  ["panca", /\bpanca\b/], ["stacco", /\bstacco\b/], ["squat", /\bsquat\b/]
+];
+const liftOf = (ex) => { const n = nk(ex).replace(/[-_]/g, " "); return LIFT_RULES.find(([, re]) => re.test(n))?.[0] ?? null; };
+const PCT_RE = /(\d+(?:[.,]\d+)?)\s*%/;
+// "3x8 @60%" -> [60] | "8/6/5 @60%" -> [60,60,60] | "8@60%/6@65%/5@70%" -> [60,65,70] | senza % -> null
+function pctsOf(scheme) {
+  const s = String(scheme ?? ""); if (!PCT_RE.test(s)) return null;
+  const ser = seriesOf(s);
+  if (!ser) return [num(s.match(PCT_RE)[1])];
+  const own = ser.map((x) => x.match(PCT_RE)?.[1]);
+  if (own.every(Boolean)) return own.map(num);
+  const one = num(s.match(PCT_RE)[1]);
+  return ser.map(() => one);
+}
+function loadFor(liftKey, pct, rm = plan.rm) {          // stessa formula di updateCalc()
+  const lift = LIFTS.find(([k]) => k === liftKey); if (!lift) return NaN;
+  const one = num(rm.lifts[liftKey]), bw = num(rm.bw);
+  if (isNaN(one) || isNaN(pct) || (lift[2] && isNaN(bw))) return NaN;
+  return lift[2] ? (pct / 100) * (bw + one) - bw : (pct / 100) * one;
+}
+const fmtLoad = (v) => String(Math.round(v * 10) / 10).replace(".", ",");
+const manualKeys = new Set();   // caselle kg toccate a mano in questa sessione: l'automatico non le tocca mai
+// Scrive nelle caselle kg i carichi calcolati dai %. Una casella gia' compilata NON viene mai toccata, tranne quando
+// cambi un massimale nel Calcolatore (prevRm = massimali precedenti) e il valore e' ancora quello automatico non modificato.
+function autofillLoads(prevRm = null) {
+  if (!plan || activeUid !== user?.uid) return false;
+  let changed = false;
+  for (const d of plan.days) for (const r of d.rows) {
+    const lk = liftOf(r.ex); if (!lk) continue;
+    for (let w = 0; w < plan.weeks; w++) {
+      const ps = pctsOf(r.scheme[w]); if (!ps) continue;
+      ps.forEach((p, si) => {
+        const key = kgKey(r.id, w, si), cur = String(plan.kg[key] ?? "");
+        if (manualKeys.has(key)) return;                  // toccata a mano (anche svuotata): resta tua
+        const old = prevRm ? loadFor(lk, p, prevRm) : NaN;
+        const wasAuto = cur !== "" && !isNaN(old) && cur === fmtLoad(old);
+        if (cur !== "" && !wasAuto) return;               // valore tuo: non si tocca
+        const v = loadFor(lk, p), val = isNaN(v) ? "" : fmtLoad(v);
+        if (val === cur) return;
+        if (val === "") delete plan.kg[key]; else plan.kg[key] = val;
+        saveKg(key, val); changed = true;
+      });
+    }
+  }
+  return changed;
+}
 
 /* ---------- annulla / ripeti ---------- */
 const hist = { undo: [], redo: [], typing: null };
@@ -319,8 +371,8 @@ function viewCalc() {
       <td><input type="text" inputmode="decimal" data-rm="lift" data-k="${k}" value="${esc(plan.rm.lifts[k] ?? "")}"></td>
       ${PCTS.map((p) => `<td data-c="${k}|${p}"></td>`).join("")}</tr>`).join("")}
     </tbody></table></div>
-    <p class="note">Squat, Panca, Stacco, Military: % x 1RM. Pull Up e Dips: % x (peso corporeo + 1RM aggiuntivo) - peso corporeo;
-    un valore negativo = serve assistenza. Per Pull Up e Dips il 1RM e' il carico aggiunto al corpo.</p>`;
+    <p class="note">Squat, Panca, Stacco, Military: % x 1RM. Pull Up, Chin Up e Dips: % x (peso corporeo + 1RM aggiuntivo) - peso corporeo;
+    un valore negativo = serve assistenza. Per Pull Up, Chin Up e Dips il 1RM e' il carico aggiunto al corpo.</p>`;
 }
 function updateCalc() {
   const bw = num(plan.rm.bw);
@@ -576,7 +628,7 @@ async function parseAndImportExcel(file, scheduleOn = null) {
       calcRows.forEach((r) => {
         if (!r || r.length < 2) return;
         const col0 = String(r[0] || "").trim();
-        const col1 = String(r[1] || "").trim();
+        const col1 = String(r[1] ?? "").trim();   // ?? e non ||: un 1RM aggiuntivo di 0 e' un valore valido
         if (col0.toLowerCase().includes("peso corporeo")) {
           importedRm.bw = col1;
         } else {
@@ -610,6 +662,7 @@ async function parseAndImportExcel(file, scheduleOn = null) {
     await setDoc(ref, clone(newPlanData));
     hist.undo = []; hist.redo = []; hist.typing = null;
     ui.day = 0; ui.week = 0;
+    manualKeys.clear(); autofillLoads();
     render();
     toast("Scheda Excel importata con successo!" + (unknownGroups.size
       ? " Gruppi non riconosciuti messi in Petto: " + [...unknownGroups].join(", ")
@@ -686,7 +739,8 @@ const parseDate = (v) => {
 const dateKey = (iso) => Number(String(iso).replace(/-/g, ""));   // 2026-11-02 -> 20261102 (usato dalle regole)
 const slug = (s) => String(s || "scheda").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "scheda";
 let extras = { sched: [], arch: [] }, extrasFor = null;   // extrasFor = uid per cui l'elenco e' caricato
-let scheduleDate = null, checkedFor = null, held = null, checking = false;
+let scheduleDate = null, checkedFor = null, held = null, checking = false, resuming = false;
+const checkKey = (uid) => `${uid}|${todayStr()}`;   // verifica "una volta al giorno per utente"; si azzera quando arriva una scheda nuova
 
 // salva la scheda attuale (con kg e massimali) nell'archivio
 async function archiveCurrent(reason) {
@@ -773,16 +827,37 @@ async function restoreArchived(uid, entry) {
 
 // all'apertura di una scheda: se una programmata ha raggiunto la data, attivala (ritorna true se ha scambiato)
 async function checkScheduled(uid) {
-  if (checkedFor === uid) return false;
-  checkedFor = uid;
+  const key = checkKey(uid);
+  if (checkedFor === key) return false;                 // gia' verificato oggi (si azzera quando arriva una scheda nuova)
+  checkedFor = key;
   try {
     const snap = await getDocs(query(collection(db, "users", uid, "scheduled"), where("startDate", "<=", todayStr())));
     if (snap.empty) return false;
     const due = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
       .sort((a, b) => String(a.startDate).localeCompare(String(b.startDate)));
     return await activateScheduled(uid, due.at(-1), due.slice(0, -1));
-  } catch (e) { console.warn("schede programmate:", e.code || e); return false; }
+  } catch (e) {
+    console.warn("schede programmate:", e.code || e);
+    if (checkedFor === key) checkedFor = null;          // offline/errore: riprova al prossimo rientro
+    return false;
+  }
 }
+
+// rientro in primo piano: se nel frattempo una programmata e' scaduta, attivala subito
+async function checkScheduledOnResume() {
+  const uid = activeUid;
+  if (!uid || !rendered || resuming || checking || checkedFor === checkKey(uid)) return;
+  resuming = true;
+  try {
+    flushSaves();                                       // i kg appena scritti finiscono nell'archivio con la vecchia scheda
+    await Promise.race([waitForPendingWrites(db), new Promise((r) => setTimeout(r, 3000))]);
+    if (uid !== activeUid) return;
+    await checkScheduled(uid);                          // se scambia, arriva lo snapshot col nuovo planId e apply() ridisegna
+  } finally { resuming = false; }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") checkScheduledOnResume();
+});
 
 async function loadExtras() {
   const uid = activeUid; if (!uid) return;
@@ -901,7 +976,7 @@ function viewPreview() {
 async function listenToUid(uid) {
   flushSaves();                                   // salva sul vecchio riferimento prima di cambiare
   if (unsub) { unsub(); unsub = null; }
-  plan = null; rendered = false; held = null; checking = false;
+  plan = null; rendered = false; held = null; checking = false; manualKeys.clear();
   extras = { sched: [], arch: [] }; extrasFor = null;
   hist.undo = []; hist.redo = []; hist.typing = null;
   activeUid = uid; ui.preview = null;
@@ -909,19 +984,21 @@ async function listenToUid(uid) {
   showMsg("<p>Caricamento scheda in corso...</p>");
 
   const apply = (snap) => {
-    if (rendered) {
+    if (rendered && (snap.data()?.planId ?? "") === (plan?.planId ?? "")) {   // stessa scheda: non interrompere chi sta scrivendo
       if (snap.metadata.hasPendingWrites || timers.size) return;
       const a = document.activeElement;
       if (a && view.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return;
-    }
+    }                                                                        // scheda sostituita: si applica sempre
     const prevPid = plan?.planId;
     normChanged = false;
     plan = normalize(snap.data());
     if (!rendered) restoreUi();
     else if (prevPid !== plan.planId) {            // la scheda e' stata sostituita: stesso tab, ma riparti da Giorno 1 / S1
       ui.day = 0; ui.week = 0; ui.edit = false; ui.preview = null; extrasFor = null; saveUi();
+      checkedFor = null; manualKeys.clear();       // scheda nuova: azzera la variabile di verifica e i kg "manuali"
     }
     if (normChanged && activeUid === user?.uid) { normChanged = false; saveStruct(); }
+    if (!rendered || prevPid !== plan.planId) autofillLoads();   // carichi dai % della scheda (dal Calcolatore)
     render();
   };
 
@@ -931,7 +1008,7 @@ async function listenToUid(uid) {
       if (snap.metadata.fromCache) showMsg("<p>Connessione in corso...</p>"); else showOnboarding();
       return;
     }
-    if (!rendered && (checkedFor !== uid || checking)) {   // prima di mostrare la scheda: e' scaduta una programmata?
+    if (!rendered && (checkedFor !== checkKey(uid) || checking)) {   // prima di mostrare la scheda: e' scaduta una programmata?
       held = snap;
       if (!checking) {
         checking = true;
@@ -1001,7 +1078,7 @@ async function handleAction(a, t) {
       await schedAction(a, t); return;
     case "day": ui.day = +t.dataset.i; saveUi(); break;
     case "week": ui.week = +t.dataset.i; saveUi(); break;
-    case "edit": ui.edit = !ui.edit; break;
+    case "edit": ui.edit = !ui.edit; if (!ui.edit) autofillLoads(); break;
     case "undo": undo(); return;
     case "redo": redo(); return;
     case "add-day": pushUndo(); plan.days.push({ name: `Giorno ${plan.days.length + 1}`, rows: [] });
@@ -1043,10 +1120,12 @@ async function handleAction(a, t) {
 
 function onInput(e) {
   const el = e.target, ds = el.dataset;
-  if (ds.kg !== undefined) { const v = el.value.trim(); plan.kg[ds.kg] = v; if (v === "") delete plan.kg[ds.kg]; saveKg(ds.kg, v); return; }
+  if (ds.kg !== undefined) { manualKeys.add(ds.kg); const v = el.value.trim(); plan.kg[ds.kg] = v; if (v === "") delete plan.kg[ds.kg]; saveKg(ds.kg, v); return; }
   if (ds.rm !== undefined) {
+    const prevRm = clone(plan.rm);
     if (ds.rm === "bw") { plan.rm.bw = el.value; saveRm("bw", el.value); }
     else { plan.rm.lifts[ds.k] = el.value; saveRm("lifts." + ds.k, el.value); }
+    autofillLoads(prevRm);
     updateCalc(); return;
   }
   const card = el.closest("[data-row]"), f = ds.f;
@@ -1109,7 +1188,7 @@ $("#importFile").addEventListener("change", async (e) => {
       const p = normalize({ ...data, createdAt: Date.now() }); p.planId = newId();
       plan = p; await setDoc(ref, clone(p));
       hist.undo = []; hist.redo = []; hist.typing = null; ui.day = 0; ui.week = 0;
-      render(); toast("Backup JSON importato con successo!");
+      manualKeys.clear(); autofillLoads(); render(); toast("Backup JSON importato con successo!");
     } else toast("Formato file non supportato. Seleziona un file Excel (.xlsx/.xlsm) o JSON.");
   } catch (err) { toast("Importazione non riuscita: " + err.message); }
 });
