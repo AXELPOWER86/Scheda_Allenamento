@@ -9,7 +9,7 @@ import { firebaseConfig } from "./firebase-config.js";
 import { SEED_DAYS, SEED_LIBRARY } from "./seed.js";
 
 /* ---------- costanti ---------- */
-const ADMIN_EMAIL = "kataxsecret@gmail.com";
+const ADMIN_EMAILS = ["kataxsecret@gmail.com", "andyplay95@gmail.com"];   // da tenere uguale a isAdmin() nelle regole Firestore
 const GROUPS = ["Petto", "Dorso", "Spalle", "Bicipiti", "Tricipiti", "Gambe", "Core"];
 const LIFTS = [
   ["squat", "Squat", false], ["panca", "Panca piana", false], ["stacco", "Stacco", false],
@@ -28,6 +28,29 @@ const nk = (s) => String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "
 const tidy = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 let normChanged = false;
 const view = $("#view"), hdr = $("#hdr"), nav = $("#nav");
+
+/* ---------- libreria XLSX: caricata dopo l'avvio, mai bloccante ---------- */
+// Prima era un <script> nell'<head>: se il CDN era lento/irraggiungibile la pagina restava bianca fino al timeout.
+const XLSX_URLS = ["https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
+                   "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"];
+let xlsxPromise = null;
+function ensureXlsx() {
+  if (typeof XLSX !== "undefined") return Promise.resolve(true);
+  xlsxPromise ??= (async () => {
+    for (const src of XLSX_URLS) {                       // prova il CDN principale, poi quello di riserva (15 s ciascuno)
+      const ok = await new Promise((res) => {
+        const sc = document.createElement("script"); sc.src = src; sc.async = true;
+        const t = setTimeout(() => { sc.remove(); res(false); }, 15000);
+        sc.onload = () => { clearTimeout(t); res(typeof XLSX !== "undefined"); };
+        sc.onerror = () => { clearTimeout(t); sc.remove(); res(false); };
+        document.head.appendChild(sc);
+      });
+      if (ok) return true;
+    }
+    return false;
+  })().then((ok) => { if (!ok) xlsxPromise = null; return ok; });   // se fallisce, il prossimo tentativo riparte da zero
+  return xlsxPromise;
+}
 
 /* ---------- stato ---------- */
 const app = initializeApp(firebaseConfig);
@@ -247,14 +270,14 @@ function showOnboarding() {
 }
 
 function renderHeader() {
-  const isAdmin = user?.email === ADMIN_EMAIL;
+  const isAdmin = ADMIN_EMAILS.includes(user?.email?.toLowerCase());
   hdr.innerHTML = `<b>${esc(plan?.title || "Scheda allenamento")}</b>
     <div><span>${esc((user?.displayName || user?.email || "").split(" ")[0])}${isAdmin ? " (Admin)" : ""}</span>
     <button data-a="logout">Esci</button></div>`;
 }
 
 function renderAdminSection() {
-  if (user?.email !== ADMIN_EMAIL) return "";
+  if (!ADMIN_EMAILS.includes(user?.email?.toLowerCase())) return "";
   const isViewingOther = activeUid && activeUid !== user?.uid;
   const cur = dirCache.find((x) => x.uid === activeUid);
   const currentKey = cur?.email || cur?.alias || "";
@@ -411,12 +434,12 @@ function viewOpz() {
 }
 
 /* ---------- esportazione / importazione excel e json ---------- */
-function exportToExcel(src, meta = {}) {
+async function exportToExcel(src, meta = {}) {
+  if (!(await ensureXlsx())) return toast("Libreria Excel non raggiungibile: riprova tra poco.");
   const p = src || plan;                                    // scheda attuale oppure una scheda dall'archivio
   const rm = { bw: p.rm?.bw ?? "", lifts: p.rm?.lifts ?? {} };
   const kgMap = p.kg || {};
   const lib = p.library || plan?.library || {};
-  if (typeof XLSX === "undefined") return toast("Libreria XLSX in caricamento...");
   const wb = XLSX.utils.book_new();
 
   const sheetData = [];
@@ -495,7 +518,7 @@ function exportToExcel(src, meta = {}) {
 }
 
 async function parseAndImportExcel(file, scheduleOn = null) {
-  if (typeof XLSX === "undefined") return toast("Libreria XLSX in caricamento...");
+  if (!(await ensureXlsx())) return toast("Libreria Excel non raggiungibile: riprova tra poco.");
   try {
     const data = new Uint8Array(await file.arrayBuffer());
     const workbook = XLSX.read(data, { type: 'array' });
@@ -685,7 +708,7 @@ function download(name, text) {
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-const isAdminUser = () => user?.email === ADMIN_EMAIL;
+const isAdminUser = () => ADMIN_EMAILS.includes(user?.email?.toLowerCase());
 
 function registerLogin(u) {   // ad ogni accesso: riallinea UID <-> email (obbligatorio, verificato dalle regole)
   return setDoc(doc(db, "directory", u.uid), {
@@ -1000,6 +1023,7 @@ async function listenToUid(uid) {
     if (normChanged && activeUid === user?.uid) { normChanged = false; saveStruct(); }
     if (!rendered || prevPid !== plan.planId) autofillLoads();   // carichi dai % della scheda (dal Calcolatore)
     render();
+    setTimeout(ensureXlsx, 1500);                                // dopo la prima schermata: la libreria Excel si scarica in background
   };
 
   unsub = onSnapshot(ref, (snap) => {
