@@ -212,7 +212,7 @@ function normalize(p) {
     p.library[g] = out;
   }
   p.days.forEach((d) => { d.rows ??= []; d.rows.forEach((r) => {
-    r.id ??= newId(); r.scheme ??= []; r.rest ??= ""; r.ex ??= "";
+    r.id ??= newId(); r.scheme ??= []; r.rest ??= ""; r.ex ??= ""; r.note ??= "";
     while (r.scheme.length < p.weeks) r.scheme.push("");
     const grp = GROUPS.find((g) => nk(g) === nk(r.group));
     if (grp && grp !== r.group) { r.group = grp; normChanged = true; }
@@ -247,8 +247,10 @@ function clearRowKg(id) {
 }
 function setExercise(r, name) {
   if (r.ex && r.ex !== name && hasKg(r.id) &&
-      confirm("Su questa riga hai gia' dei kg segnati.\nOK = azzerali (l'esercizio cambia)\nAnnulla = mantienili"))
+      confirm("Su questa riga hai gia' dei kg segnati.\nOK = azzerali (l'esercizio cambia)\nAnnulla = mantienili")) {
     clearRowKg(r.id);
+    r.note = "";
+  }
   r.ex = name;
 }
 
@@ -337,13 +339,19 @@ function viewScheda() {
   return h + (body || `<p class="note">Giorno vuoto.</p>`);
 }
 
+function noteBoxView(r) {
+  return `<div class="erow" style="margin-top:8px"><input type="text" data-f="note" value="${esc(r.note || "")}"
+    placeholder="Note (es. rack 2, carrucola alta, maniglia triangolare...)" aria-label="Note esercizio"
+    style="flex:1;font-size:13px;padding:6px 8px;border-radius:8px;border:1px solid var(--line,#444);background:transparent;color:inherit"></div>`;
+}
+
 function cardView(r, w) {
   const ser = seriesOf(r.scheme[w]), n = ser ? ser.length : 1;
   const box = (si) => {
     const key = kgKey(r.id, w, si), cur = plan.kg[key] ?? "", prev = w > 0 ? (plan.kg[kgKey(r.id, w - 1, si)] ?? "") : "";
     return { key, cur, prev };
   };
-  const head = `<div class="card"><div class="top"><span class="badge">${esc(r.group)}</span>
+  const head = `<div class="card" data-row="${r.id}"><div class="top"><span class="badge">${esc(r.group)}</span>
     <span>&#9201; ${esc(r.rest || "-")}</span></div>
     <div class="ex">${esc(r.ex || "- scegli esercizio -")}</div>`;
   if (!ser) {
@@ -351,7 +359,7 @@ function cardView(r, w) {
     return head + `<div class="line"><div class="scheme">${esc(r.scheme[w] || "-")}</div>
     <label class="kg"><input type="text" inputmode="decimal" data-kg="${key}" value="${esc(cur)}"
       placeholder="${esc(prev)}" aria-label="kg"><span>kg</span></label></div>
-    ${prev ? `<div class="hint">sett. prec.: ${esc(prev)} kg</div>` : ""}</div>`;
+    ${prev ? `<div class="hint">sett. prec.: ${esc(prev)} kg</div>` : ""}${noteBoxView(r)}</div>`;
   }
   const boxes = Array.from({ length: n }, (_, si) => box(si));
   const prevs = boxes.map((b) => b.prev);
@@ -359,7 +367,7 @@ function cardView(r, w) {
     <div class="series">${boxes.map((b, si) => `<label class="sk"><span>${esc(ser[si])} rip</span>
       <input type="text" inputmode="decimal" data-kg="${b.key}" value="${esc(b.cur)}"
         placeholder="${esc(b.prev)}" aria-label="kg serie ${si + 1} (${esc(ser[si])} rip)"></label>`).join("")}</div>
-    ${prevs.some(Boolean) ? `<div class="hint">sett. prec.: ${prevs.map((x) => esc(x || "-")).join(" / ")} kg</div>` : ""}</div>`;
+    ${prevs.some(Boolean) ? `<div class="hint">sett. prec.: ${prevs.map((x) => esc(x || "-")).join(" / ")} kg</div>` : ""}${noteBoxView(r)}</div>`;
 }
 
 function exOptions(r) {
@@ -379,6 +387,8 @@ function cardEdit(r, i, n) {
       <select data-f="ex">${exOptions(r)}</select></div>
     <div class="schemes">${Array.from({ length: plan.weeks }, (_, w) =>
       `<label>S${w + 1}<input type="text" data-f="scheme" data-w="${w}" value="${esc(r.scheme[w] || "")}"></label>`).join("")}</div>
+    <div class="erow"><label style="flex:1">Note<input type="text" data-f="note" value="${esc(r.note || "")}"
+      placeholder="Posizione rack, macchinario, carrucola, accessori..."></label></div>
     <div class="erow"><label>Rest<input type="text" data-f="rest" value="${esc(r.rest)}" size="6"></label>
       <button data-a="up" data-id="${r.id}" ${i === 0 ? "disabled" : ""}>&uarr;</button>
       <button data-a="down" data-id="${r.id}" ${i === n - 1 ? "disabled" : ""}>&darr;</button>
@@ -450,11 +460,11 @@ async function exportToExcel(src, meta = {}) {
     header.push(`S${w}`);
     header.push("kg");
   }
-  header.push("Rest");
+  header.push("Rest", "Note");
   sheetData.push(header);
 
   p.days.forEach((day) => {
-    sheetData.push([day.name.toUpperCase(), "", ...Array(p.weeks * 2 + 1).fill("")]);
+    sheetData.push([day.name.toUpperCase(), "", ...Array(p.weeks * 2 + 2).fill("")]);
     day.rows.forEach((r) => {
       const row = [r.group || "", r.ex || ""];
       for (let w = 0; w < p.weeks; w++) {
@@ -468,7 +478,7 @@ async function exportToExcel(src, meta = {}) {
           row.push(kgMap[kgKey(r.id, w, 0)] || "");
         }
       }
-      row.push(r.rest || "");
+      row.push(r.rest || "", r.note || "");
       sheetData.push(row);
     });
   });
@@ -548,7 +558,7 @@ async function parseAndImportExcel(file, scheduleOn = null) {
 
     const headerRow = rows[headerRowIdx] || [];
     const weekMap = [];
-    let restColIdx = -1;
+    let restColIdx = -1, noteColIdx = -1;
 
     headerRow.forEach((h, idx) => {
       const text = String(h || "").trim().toUpperCase();
@@ -560,6 +570,9 @@ async function parseAndImportExcel(file, scheduleOn = null) {
       }
       if (text === "REST" || text === "RECUPERO") {
         restColIdx = idx;
+      }
+      if (text === "NOTE" || text === "NOTA") {
+        noteColIdx = idx;
       }
     });
 
@@ -591,6 +604,10 @@ async function parseAndImportExcel(file, scheduleOn = null) {
         if (restColIdx !== -1 && row[restColIdx] !== undefined && row[restColIdx] !== "") {
           restVal = String(row[restColIdx]).trim();
         }
+        let noteVal = "";
+        if (noteColIdx !== -1 && row[noteColIdx] !== undefined && row[noteColIdx] !== "") {
+          noteVal = String(row[noteColIdx]).trim();
+        }
 
         weekMap.forEach(({ weekIdx, colS, colKg }) => {
           const schVal = String(row[colS] ?? "").trim();
@@ -617,7 +634,8 @@ async function parseAndImportExcel(file, scheduleOn = null) {
           group: GROUPS.find((g) => g.toLowerCase() === group.toLowerCase()) || (unknownGroups.add(group), "Petto"),
           ex: ex,
           scheme: scheme,
-          rest: restVal
+          rest: restVal,
+          note: noteVal
         });
       }
     }
@@ -992,6 +1010,7 @@ function viewPreview() {
     (a.days || []).map((d) => `<div class="sec">${esc(d.name)}</div>` + (d.rows || []).map((r) =>
       `<div class="card"><div class="top"><span class="badge" data-g="${esc(r.group)}">${esc(r.group)}</span>
       <span>&#9201; ${esc(r.rest || "-")}</span></div><div class="ex">${esc(r.ex)}</div>
+      ${r.note ? `<div class="hint" style="text-align:left;margin:4px 0">${esc(r.note)}</div>` : ""}
       ${Array.from({ length: weeks }, (_, w) => `<div style="${line}"><span>S${w + 1}</span>
         <span>${esc(r.scheme?.[w] || "-")}</span><b>${esc(kgText(r, w))}</b></div>`).join("")}</div>`).join("")).join("");
 }
@@ -1111,7 +1130,7 @@ async function handleAction(a, t) {
       if (!d || !confirm(`Eliminare "${d.name}" e i kg dei suoi esercizi?`)) return;
       pushUndo(); d.rows.forEach((r) => clearRowKg(r.id)); plan.days.splice(ui.day, 1); saveStruct(); break;
     case "add-row": pushUndo(); d.rows.push({ id: newId(), group: d.rows.at(-1)?.group || "Petto", ex: "",
-      scheme: Array(plan.weeks).fill(""), rest: "" }); saveStruct(); break;
+      scheme: Array(plan.weeks).fill(""), rest: "", note: "" }); saveStruct(); break;
     case "del-row": if (!confirm("Eliminare questo esercizio e i suoi kg?")) return;
       pushUndo(); { const f = findRow(t.dataset.id); if (f) { clearRowKg(f.r.id); f.d.rows.splice(f.i, 1); } }
       saveStruct(); break;
@@ -1158,6 +1177,7 @@ function onInput(e) {
   const row = card && findRow(card.dataset.row)?.r; if (!row) return;
   if (f === "scheme") { typing("s" + row.id + ds.w); row.scheme[+ds.w] = el.value; saveStruct(); }
   if (f === "rest") { typing("r" + row.id); row.rest = el.value; saveStruct(); }
+  if (f === "note") { typing("n" + row.id); row.note = el.value; saveStruct(); }
 }
 
 function onChange(e) {
