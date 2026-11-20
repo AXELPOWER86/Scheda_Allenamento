@@ -341,7 +341,7 @@ function viewScheda() {
 
 function noteBoxView(r) {
   return `<div class="erow" style="margin-top:8px"><input type="text" data-f="note" value="${esc(r.note || "")}"
-    placeholder="Note (es. rack 2, carrucola alta, maniglia triangolare...)" aria-label="Note esercizio"
+    placeholder="Note (es rack pos. 25)" aria-label="Note esercizio"
     style="flex:1;font-size:13px;padding:6px 8px;border-radius:8px;border:1px solid var(--line,#444);background:transparent;color:inherit"></div>`;
 }
 
